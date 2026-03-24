@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Polar H10 Pro Monitor 1.6</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
+<style>
+body { background:#000; color:#fff; font-family:sans-serif; margin:0; padding:10px; }
+h2 { text-align:center; color:#0f0; margin:5px 0; }
+button { width:100%; padding:15px; margin:5px 0; font-size:16px; border:none; border-radius:10px; font-weight:bold; cursor:pointer; }
+button.connect { background:#0f0; color:#000; }
+button.export { background:#44f; color:#fff; }
+#status-box { background:#111; padding:10px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; font-size:14px; }
+canvas { background:#050505; border-radius:10px; margin-top:5px; width:100% !important; border:1px solid #222; }
+.metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:10px 0; }
+.metric { background:#111; padding:10px; border-radius:10px; text-align:center; }
+.label { font-size:13px; color:#aaa; display:block; }
+.val { font-size:22px; font-weight:bold; display:block; color:#0f0; }
+.afib-status { font-size:20px; font-weight:bold; text-align:center; padding:12px; border-radius:10px; margin-top:5px; }
+.afib-red { background:#500; color:#ff7777; border: 1px solid #f00; }
+.afib-green { background:#030; color:#0f0; border: 1px solid #0f0; }
+#debug-log { background:#111; color:#0f0; font-family:monospace; font-size:11px; height:80px; overflow-y:auto; border:1px solid #333; margin-top:10px; padding:5px; }
+.chart-container { position: relative; width: 320px; margin: 0 auto; padding-bottom: 20px; }
+</style>
+</head>
+<body>
+
+<h2>Polar H10 Pro Monitor 1.5</h2>
+
+<div id="status-box">
+  <span>Status: <b id="status">Bereit</b></span>
+  <span style="color: #0f0;">Zyklen: <b id="rr-count">0</b></span>
+  <span>Batterie: <b id="batt">--</b>%</span>
+</div>
+
+<button class="connect" onclick="connect()">CONNECT GURT</button>
+<button class="export" onclick="exportCSV()">CSV EXPORT</button>
+<button id="ecgToggleBtn" onclick="toggleECG()" style="background-color: #555; color: white; margin-top: 10px;">
+  EKG STARTEN
+</button>
+
+<div class="metrics-grid">
+  <div class="metric"><span class="label">BPM</span><span id="bpm" class="val">--</span></div>
+  <div class="metric"><span class="label">RMSSD (ms)</span><span id="rmssd" class="val">--</span></div>
+  <div class="metric"><span class="label">SD1 (Kurzzeit)</span><span id="sd1" class="val">--</span></div>
+  <div class="metric"><span class="label">SD2 (Langzeit)</span><span id="sd2" class="val">--</span></div>
+</div>
+
+<div id="afib" class="afib-status afib-green">Sinusrhythmus</div>
+
+<div class="label" style="margin-top:15px; text-align:center;">EKG-Echtzeit-Track (Zoom x5)</div>
+<canvas id="ecgCanvas" width="800" height="200"></canvas>
+
+<div class="chart-container">
+  <div class="label" style="text-align:center; margin-top:15px;">Lorentz-Plot (RR<sub>n+1</sub> vs RR<sub>n</sub>)</div>
+  <canvas id="lorentzCanvas" width="400" height="400" style="width:300px !important; height:300px !important;"></canvas>
+</div>
+
+<div id="debug-log">Log bereit...</div>
+
+<script>
+
+const db = new Dexie("PolarDB");
+db.version(1).stores({ samples: "++id, timestamp, type, val" });
+
+let device, server, buffer = [];
+let rrDisplay = []; // Für die Kurzzeit-Statistik (150-300 Werte)
+let allRRData = []; // Die "Nacht-Wolke" (unbegrenzt)
+const ecgDisplay = new Array(600).fill(0);
+let ecgActive = false;
+let ecgTempArray = [];
+
+function log(msg) {
+    const l = document.getElementById("debug-log");
+    l.innerHTML += "><br> " + msg;
+    l.scrollTop = l.scrollHeight;
+}
+
+// EKG LOGIK
+function handleECG(e) {
+    const dv = e.target.value;
+    for(let i=10; i<dv.byteLength; i+=3) {
+        let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
+        if (val & 0x800000) val |= 0xFF000000; 
+
+        ecgDisplay.push(val); 
+        if(ecgDisplay.length > 600) ecgDisplay.shift();
+
+        if (i % 6 === 0) ecgTempArray.push(Math.round(val));
+
+        if (ecgTempArray.length >= 65) {
+            buffer.push({ timestamp: Date.now(), type: 'ECG_BLOCK', val: ecgTempArray.join(",") });
+            ecgTempArray = [];
+        }
+    }
+}
+
+// RR / HERZRATE LOGIK
+async function startHR() {
+  const s = await server.getPrimaryService('heart_rate');
+  const c = await s.getCharacteristic('heart_rate_measurement');
+  await c.startNotifications();
+  c.addEventListener('characteristicvaluechanged', e => {
+    const v = e.target.value;
+    const flags = v.getUint8(0);
+    let offset = (flags & 0x01) ? 3 : 2;
+
+    // Puls-Anzeige (BPM)
+    document.getElementById("bpm").innerText = v.getUint8(1);
+
+    // RR-Intervalle verarbeiten
+    for (let i = offset; i < v.byteLength; i += 2) {
+      const rawRR = v.getUint16(i, true);
+      const rr = (rawRR / 1024) * 1000; // Umrechnung in ms
+
+      if (rr > 0) {
+        allRRData.push(rr); // Für die Wolke (Langzeit)      
+    
+    // NEU: Live-Update des Zählers auf dem Display
+    document.getElementById("rr-count").innerText = allRRData.length;
+    
+        rrDisplay.push(rr); // Für die Statistik (Kurzzeit)
+        if(rrDisplay.length > 150) rrDisplay.shift();
+        
+        buffer.push({ timestamp: Date.now(), type: 'RR', val: rr });
+        updateHRV();
+      }
+    }
+  });
+}
+
+// STATISTIKEN (RMSSD, SD1, SD2)
+function updateHRV() {
+  if (rrDisplay.length < 10) return;
+  
+  let diffs = [];
+  for(let i=1; i < rrDisplay.length; i++) {
+    diffs.push(rrDisplay[i] - rrDisplay[i-1]);
+  }
+  
+  let rmssd = Math.sqrt(diffs.reduce((a,b) => a + b*b, 0) / diffs.length);
+  document.getElementById("rmssd").innerText = rmssd.toFixed(1);
+
+  let avgRR = rrDisplay.reduce((x,y) => x + y) / rrDisplay.length;
+  let stdRR = Math.sqrt(rrDisplay.reduce((a,b) => a + Math.pow(b - avgRR, 2), 0) / rrDisplay.length);
+  
+  let sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+  let sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(stdRR, 2) - 0.5 * Math.pow(rmssd, 2)));
+  
+  document.getElementById("sd1").innerText = sd1.toFixed(1);
+  document.getElementById("sd2").innerText = sd2.toFixed(1);
+
+  const af = document.getElementById("afib");
+  if(rmssd > 100 || (sd1/sd2 > 0.65 && rmssd > 45)) {
+      af.innerText="AFib Verdacht";
+      af.className="afib-status afib-red";
+  } else {
+      af.innerText="Sinusrhythmus";
+      af.className="afib-status afib-green";
+  }
+}
+
+// ... (Restliche Funktionen: connect, startECG, drawECG, drawLorentz, exportCSV, toggleECG bleiben wie sie sind) ...
+
+// WICHTIG: Die renderLoop muss laufen
+function renderLoop() {
+  drawECG();
+  drawLorentz();
+  requestAnimationFrame(renderLoop);
+}
+
+// CONNECTION
+async function connect() {
+    log("Verbinde...");
+    try {
+        device = await navigator.bluetooth.requestDevice({
+            filters: [{ services: ['heart_rate'] }],
+            optionalServices: ['battery_service', 'fb005c80-02e7-f387-1cad-8acd2d8df0c8']
+        });
+        server = await device.gatt.connect();
+        document.getElementById("status").innerText = "Verbunden";
+        await startHR();
+        // EKG wird nicht mehr automatisch gestartet für Nacht-Sicherheit
+        log("Verbunden. EKG kann manuell gestartet werden.");
+        
+        requestAnimationFrame(renderLoop);
+    } catch (error) {
+        log("Fehler: " + error.message);
+    }
+}
+
+// LORENTZ PLOT (Optimierte Skalierung)
+function drawLorentz() {
+  const canvas = document.getElementById("lorentzCanvas");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const padding = 30; // Platz für Beschriftung
+  const plotW = w - padding;
+  const plotH = h - padding;
+
+  const data = allRRData.length > 2 ? allRRData : rrDisplay;
+  
+  ctx.clearRect(0, 0, w, h);
+  
+  // 1. ACHSEN & RASTER
+  ctx.strokeStyle = "#222"; // Sehr dunkles Raster für maximalen Kontrast
+  ctx.lineWidth = 1;
+  ctx.strokeRect(padding, 0, plotW, plotH);
+
+  ctx.fillStyle = "#888"; // Dezente Beschriftung
+  ctx.font = "10px sans-serif";
+  ctx.textAlign = "center";
+
+  [400, 900, 1400].forEach(val => {
+    const pos = ((val - 400) / 1000) * plotW;
+    // X-Achse
+    ctx.fillText(val + "ms", padding + pos, h - 5);
+    // Y-Achse
+    ctx.textAlign = "right";
+    ctx.fillText(val, padding - 5, plotH - pos + 4);
+  });
+
+  // Diagonale
+  ctx.strokeStyle = "#111"; // Fast unsichtbare Diagonale
+  ctx.beginPath();
+  ctx.moveTo(padding, plotH);
+  ctx.lineTo(w, 0);
+  ctx.stroke();
+
+  if (data.length < 2) return;
+
+  // 2. DATENPUNKTE ZEICHNEN MIT HÄUFIGKEITS-FARBVERLAUF
+  // Wir zeichnen die Punkte in einem Durchgang mit HSLA
+  
+  for (let i = 1; i < data.length; i++) {
+    const x = padding + ((data[i-1] - 400) / 1000) * plotW;
+    const y = plotH - ((data[i] - 400) / 1000) * plotH;
+
+    if(x >= padding && x <= w && y >= 0 && y <= plotH) {
+        // HÄUFIGKEITS-LOGIK:
+        // Farbton (Hue): 120 ist rein Grün, 60 ist rein Gelb.
+        // Helligkeit (Lightness): 30% ist dunkel, 50% ist hell, 70% ist fast weiß.
+        
+        // Wir nehmen einen Basis-Farbton (Hellgrün)
+        // Aber wir verändern die Transparenz (Alpha).
+        // Je mehr Punkte übereinander liegen, desto intensiver wird das Grün,
+        // und die Helligkeit wird erhöht, wodurch es optisch "nach Gelb" kippt.
+        
+        ctx.fillStyle = "hsla(80, 100%, 60%, 0.4)"; // Start bei Hellgrün-Gelb, sehr transparent
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+  }
+
+  // Achsen-Label
+  ctx.save();
+  ctx.translate(10, plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText("RR n+1 (ms)", 0, 0);
+  ctx.restore();
+  ctx.textAlign = "center";
+  ctx.fillText("RR n (ms)", padding + plotW / 2, h - 18);
+}
+
+// DB SYNC
+setInterval(() => {
+  if(buffer.length > 0) { 
+    db.samples.bulkAdd(buffer).then(() => { buffer = []; });
+  }
+}, 2000);
+
+async function startECG() {
+    log("Suche EKG Service...");
+    const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
+    const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
+    const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
+    await data.startNotifications();
+    data.addEventListener('characteristicvaluechanged', handleECG);
+    await new Promise(r => setTimeout(r, 500));
+    const cmd = new Uint8Array([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00]);
+    await ctrl.writeValue(cmd);
+    log("EKG gestartet.");
+}
+
+async function toggleECG() {
+    const btn = document.getElementById("ecgToggleBtn");
+    if (!ecgActive) {
+        await startECG();
+        ecgActive = true;
+        btn.innerText = "EKG STOPPEN";
+        btn.style.backgroundColor = "#d32f2f";
+    } else {
+        const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
+        const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
+        await ctrl.writeValue(new Uint8Array([0x03, 0x00])); 
+        ecgActive = false;
+        btn.innerText = "EKG STARTEN";
+        btn.style.backgroundColor = "#555";
+        ecgDisplay.fill(0);
+    }
+}
+
+function drawECG() {
+  const canvas = document.getElementById("ecgCanvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if (ecgDisplay.length < 10) return;
+  let min = Math.min(...ecgDisplay);
+  let max = Math.max(...ecgDisplay);
+  let range = max - min;
+  if(range < 10) range = 1000; 
+  ctx.beginPath(); 
+  ctx.strokeStyle = "#0f0"; 
+  ctx.lineWidth = 2;
+  for(let i=0; i<ecgDisplay.length; i++) {
+    const y = 190 - ((ecgDisplay[i] - min) / range) * 180;
+    if(i===0) ctx.moveTo(i*(canvas.width/ecgDisplay.length), y); 
+    else ctx.lineTo(i*(canvas.width/ecgDisplay.length), y);
+  }
+  ctx.stroke();
+}
+
+async function exportCSV() {
+    log("Export berechnet... bitte warten.");
+    try {
+        const all = await db.samples.toArray();
+        if (all.length === 0) { alert("Keine Daten in der Datenbank."); return; }
+        
+                // Zeitstempel-Analyse
+        const first = all[0].timestamp;
+        const last = all[all.length - 1].timestamp;
+        const dauerMin = Math.round((last - first) / 60000);
+        const stunden = Math.floor(dauerMin / 60);
+        const minuten = dauerMin % 60;
+
+        // Zusammenfassung im Log ausgeben
+        log(`--- ANALYSE DER MESSUNG ---`);
+        log(`Dauer: ${stunden}h ${minuten}min`);
+        log(`Gesamtzyklen (RR): ${allRRData.length}`);
+        log(`---------------------------`);
+        
+        // Wir bauen die CSV in Blöcken auf, um den Arbeitsspeicher zu schonen
+        let csvRows = ["Timestamp;Type;Data"];
+        
+        for (let i = 0; i < all.length; i++) {
+            const r = all[i];
+            // Sicherstellen, dass wir keine kaputten Zeilen exportieren
+            if (r.timestamp && r.type) {
+                csvRows.push(`${r.timestamp};${r.type};${r.val}`);
+            }
+            
+            // Zwischen-Log alle 5000 Zeilen
+            if (i % 5000 === 0) log(`Verarbeite Zeile ${i}...`);
+        }
+
+        const csvString = csvRows.join("\n");
+        const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Polar_V1.5_Export_${new Date().toISOString().slice(0,19)}.csv`;
+        document.body.appendChild(a); // Notwendig für einige Browser
+        a.click();
+        document.body.removeChild(a);
+        
+        log("Export fertig! Datei wurde heruntergeladen.");
+
+        // Sicherheitsabfrage zum Löschen
+        setTimeout(() => {
+            if(confirm("Daten erfolgreich exportiert? Sollen die " + all.length + " Einträge jetzt gelöscht werden?")) {
+                db.samples.clear();
+                allRRData = []; // Auch die Wolke auf dem Display zurücksetzen
+                log("Datenbank & Plot geleert.");
+            }
+        }, 1000);
+
+    } catch (err) {
+        log("Export-Fehler: " + err.message);
+        console.error(err);
+    }
+}
+
+
+</script>
+</body>
+</html>
