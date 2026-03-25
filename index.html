@@ -37,6 +37,8 @@
 
 <button class="connect" onclick="connect()">CONNECT & WAKE-LOCK</button>
 <button class="export" onclick="exportToFolder()">CSV EXPORT (TEILEN/SPEICHERN)</button>
+<button class="export" style="background:#666;" onclick="document.getElementById('fileInput').click()">CSV IMPORT (ANALYSE)</button>
+<input type="file" id="fileInput" style="display:none" accept=".csv" onchange="importCSV(event)">
 <button id="ecgToggleBtn" onclick="toggleECG()" style="background-color: #555; color: white;">EKG STARTEN</button>
 
 <div class="metrics-grid">
@@ -198,6 +200,80 @@ async function exportToFolder() {
     } catch (err) { log("Export-Fehler: " + err.message); }
 }
 
+async function importCSV(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const content = e.target.result;
+        const lines = content.split("\n");
+        const importedRR = [];
+
+        log("Importiere " + file.name + "...");
+
+        // Start bei 1, um Header zu überspringen
+        for (let i = 1; i < lines.length; i++) {
+            const cols = lines[i].split(";");
+            if (cols.length >= 3 && cols[1] === "RR") {
+                const val = parseFloat(cols[2]);
+                if (!isNaN(val)) importedRR.push(val);
+            }
+        }
+
+        if (importedRR.length > 0) {
+            allRRData = importedRR;
+            // Wir nehmen die letzten 150 für das Display-Array, 
+            // damit die Live-Funktionen nicht abstürzen
+            rrDisplay = importedRR.slice(-150); 
+            
+            document.getElementById("rr-count").innerText = allRRData.length;
+            
+            // Metriken für den GESAMTEN importierten Datensatz berechnen
+            analyzeFullDataset(allRRData);
+            
+            // Plot erzwingen
+            drawLorentz();
+            log(importedRR.length + " RR-Punkte geladen.");
+        } else {
+            alert("Keine RR-Daten in der Datei gefunden.");
+        }
+    };
+    reader.readAsText(file);
+}
+
+// Spezielle Analyse für große Datensätze (Import)
+function analyzeFullDataset(data) {
+    if (data.length < 5) return;
+
+    // RMSSD
+    let diffs = [];
+    for(let i=1; i < data.length; i++) diffs.push(data[i] - data[i-1]);
+    let rmssd = Math.sqrt(diffs.reduce((a,b) => a + b*b, 0) / diffs.length);
+    
+    // SDNN (für SD2 Berechnung wichtig)
+    let avgRR = data.reduce((x,y) => x + y) / data.length;
+    let stdRR = Math.sqrt(data.reduce((a,b) => a + Math.pow(b - avgRR, 2), 0) / data.length);
+    
+    // Poincare Metriken
+    let sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+    let sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(stdRR, 2) - 0.5 * Math.pow(rmssd, 2)));
+
+    // Anzeige aktualisieren
+    document.getElementById("rmssd").innerText = rmssd.toFixed(1);
+    document.getElementById("sd1").innerText = sd1.toFixed(1);
+    document.getElementById("sd2").innerText = sd2.toFixed(1);
+    document.getElementById("bpm").innerText = Math.round(60000 / avgRR); // Durchschnitts-Puls
+
+    const af = document.getElementById("afib");
+    if(rmssd > 100 || (sd1/sd2 > 0.65 && rmssd > 45)) {
+        af.innerText="Auffällig / Unregelmäßig"; af.className="afib-status afib-red";
+    } else {
+        af.innerText="Unauffällig (Sinus)"; af.className="afib-status afib-green";
+    }
+}
+
+    
 function handleECG(e) {
     if (!ecgActive) return;
     const dv = e.target.value;
