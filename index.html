@@ -2,86 +2,64 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Pro Monitor 2.0 (Binary Optimized)</title>
+<title>Polar H10 Monitor 2.3 (Global Analytics)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
     body { background:#000; color:#fff; font-family:sans-serif; margin:0; padding:10px; }
-    h2 { text-align:center; color:#0f0; margin:5px 0; }
+    h2 { text-align:center; color:#0f0; margin:5px 0; font-size: 20px; }
     button { width:100%; padding:15px; margin:5px 0; font-size:16px; border:none; border-radius:10px; font-weight:bold; cursor:pointer; }
-    button.connect { background:#0f0; color:#000; }
-    button.export { background:#44f; color:#fff; }
-    #status-box { background:#111; padding:10px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; font-size:14px; }
-    canvas { background:#050505; border-radius:10px; margin-top:5px; width:100%!important; border:1px solid #222; }
+    .connect { background:#0f0; color:#000; }
+    .btn-rr { background:#44f; color:#fff; }
+    .btn-bin { background:#f80; color:#000; }
+    #status-box { background:#111; padding:10px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; font-size:13px; }
+    canvas { background:#050505; border-radius:10px; width:100%!important; border:1px solid #222; }
     .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:10px 0; }
-    .metric { background:#111; padding:10px; border-radius:10px; text-align:center; }
-    .label { font-size:13px; color:#aaa; display:block; }
-    .val { font-size:22px; font-weight:bold; display:block; color:#0f0; }
-    .afib-status { font-size:20px; font-weight:bold; text-align:center; padding:12px; border-radius:10px; margin-top:5px; }
-    .afib-red { background:#500; color:#ff7777; border: 1px solid #f00; }
-    .afib-green { background:#030; color:#0f0; border: 1px solid #0f0; }
-    #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:11px; height:100px; overflow-y:auto; border:1px solid #333; margin-top:10px; padding:5px; }
-    .chart-container { position: relative; width: 320px; margin: 0 auto; padding-bottom: 20px; }
+    .metric { background:#111; padding:10px; border-radius:10px; text-align:center; border: 1px solid #333; }
+    .val { font-size:24px; font-weight:bold; color:#0f0; display:block; }
+    .label { font-size:11px; color:#aaa; text-transform: uppercase; }
+    #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:10px; height:60px; overflow-y:auto; border:1px solid #333; margin-top:10px; padding:5px; }
 </style>
 </head>
 <body>
 
-<h2>Polar H10 Pro Monitor 2.0</h2>
+<h2>Polar H10 Monitor 2.3</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
-  <span style="color: #0f0;">RR: <b id="rr-count">0</b></span>
-  <span>Batterie: <b id="batt">--</b>%</span>
+  <span>Gesamt-RR: <b id="rr-count">0</b></span>
+  <span>Batt: <b id="batt">--</b>%</span>
 </div>
 
-<button class="connect" onclick="connect()">CONNECT & WAKE-LOCK</button>
-<button class="export" onclick="exportData()">EXPORT (CSV)</button>
-<button class="export" style="background:#666;" onclick="document.getElementById('fileInput').click()">IMPORT CSV (ANALYSE)</button>
-<input type="file" id="fileInput" style="display:none" accept=".csv" onchange="importCSV(event)">
-<button id="ecgToggleBtn" onclick="toggleECG()" style="background-color: #555; color: white;">EKG STARTEN</button>
+<button class="connect" onclick="connect()">SENSOR VERBINDEN</button>
+<button id="ecgToggleBtn" onclick="toggleECG()" style="background:#555; color:#fff;">EKG STARTEN</button>
+<button class="btn-rr" onclick="exportRR()">NUR RR (CSV)</button>
+<button class="btn-bin" onclick="exportBinary()">RR + EKG (BINÄR)</button>
 
 <div class="metrics-grid">
-  <div class="metric"><span class="label">BPM</span><span id="bpm" class="val">--</span></div>
-  <div class="metric"><span class="label">RMSSD (ms)</span><span id="rmssd" class="val">--</span></div>
-  <div class="metric"><span class="label">SD1 (ms)</span><span id="sd1" class="val">--</span></div>
-  <div class="metric"><span class="label">SD2 (ms)</span><span id="sd2" class="val">--</span></div>
+  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Live)</span></div>
+  <div class="metric"><span id="rmssd" class="val">--</span><span class="label">RMSSD (Gesamt)</span></div>
+  <div class="metric"><span id="sd1" class="val">--</span><span class="label">SD1 (ms)</span></div>
+  <div class="metric"><span id="sd2" class="val">--</span><span class="label">SD2 (ms)</span></div>
 </div>
 
-<div id="afib" class="afib-status afib-green">Sinusrhythmus</div>
+<canvas id="ecgCanvas" width="800" height="150"></canvas>
+<div style="text-align:center; margin-top:15px; color:#aaa; font-size:12px;">Lorentz Plot (Gesamte Messung)</div>
+<canvas id="lorentzCanvas" width="400" height="400" style="width:320px!important; margin:5px auto; display:block;"></canvas>
 
-<canvas id="ecgCanvas" width="800" height="200"></canvas>
-<div class="chart-container">
-  <div class="label" style="text-align:center; margin-top:10px;">Poincaré / Lorentz Plot</div>
-  <canvas id="lorentzCanvas" width="400" height="400" style="width:300px!important; height:300px!important;"></canvas>
-</div>
-
-<div id="debug-log">System bereit...</div>
+<div id="debug-log">> System bereit.</div>
 
 <script>
-// Datenbank-Initialisierung (Speicherung von Blobs möglich)
 const db = new Dexie("PolarDB");
-db.version(2).stores({ samples: "++id, timestamp, type" });
+db.version(3).stores({ samples: "++id, timestamp, type" });
 
 let device, server, ecgActive = false;
-let rrDisplay = [], allRRData = [], ecgDisplay = new Array(600).fill(0);
-let wakeLock = null;
-let lastStoredEcgValue = 0;
-
-const silentAudio = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==");
-silentAudio.loop = true;
+let allRRData = [], ecgDisplay = new Array(600).fill(0);
 
 function log(msg) {
     const l = document.getElementById("debug-log");
     l.innerHTML += "> " + msg + "<br>";
     l.scrollTop = l.scrollHeight;
-}
-
-async function activateWakeLock() {
-    try {
-        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
-        silentAudio.play();
-        log("Wake-Lock aktiv.");
-    } catch (err) { log("Wake-Lock Fehler: " + err.message); }
 }
 
 async function connect() {
@@ -92,10 +70,15 @@ async function connect() {
         });
         server = await device.gatt.connect();
         document.getElementById("status").innerText = "Verbunden";
-        await activateWakeLock();
+        
+        const bS = await server.getPrimaryService('battery_service');
+        const bC = await bS.getCharacteristic('battery_level');
+        const bV = await bC.readValue();
+        document.getElementById("batt").innerText = bV.getUint8(0);
+
         await startHR();
         requestAnimationFrame(renderLoop);
-    } catch (error) { log("Fehler: " + error.message); }
+    } catch (e) { log("Error: " + e.message); }
 }
 
 async function startHR() {
@@ -107,26 +90,45 @@ async function startHR() {
     const flags = v.getUint8(0);
     let offset = (flags & 0x01) ? 3 : 2;
     document.getElementById("bpm").innerText = v.getUint8(1);
-
     for (let i = offset; i < v.byteLength; i += 2) {
       const rr = (v.getUint16(i, true) / 1024) * 1000;
       if (rr > 0) {
         allRRData.push(rr);
         document.getElementById("rr-count").innerText = allRRData.length;
-        rrDisplay.push(rr);
-        if(rrDisplay.length > 150) rrDisplay.shift();
-        db.samples.add({ timestamp: Date.now(), type: 'RR', val: rr.toFixed(0) });
-        updateHRV();
+        db.samples.add({ timestamp: Date.now(), type: 'RR', val: rr });
+        calculateGlobalHRV();
       }
     }
   });
+}
+
+function calculateGlobalHRV() {
+    if (allRRData.length < 5) return;
+    
+    // RMSSD (Gesamt)
+    let diffsSq = 0;
+    for(let i=1; i < allRRData.length; i++) {
+        diffsSq += Math.pow(allRRData[i] - allRRData[i-1], 2);
+    }
+    const rmssd = Math.sqrt(diffsSq / (allRRData.length - 1));
+    
+    // SDNN & Poincaré (SD1/SD2)
+    const avg = allRRData.reduce((a, b) => a + b) / allRRData.length;
+    const variance = allRRData.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / allRRData.length;
+    const sdnn = Math.sqrt(variance);
+    
+    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+    const sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
+
+    document.getElementById("rmssd").innerText = rmssd.toFixed(1);
+    document.getElementById("sd1").innerText = sd1.toFixed(1);
+    document.getElementById("sd2").innerText = sd2.toFixed(1);
 }
 
 function handleECG(e) {
     if (!ecgActive) return;
     const dv = e.target.value;
     const batch = [];
-    
     for(let i=10; i < dv.byteLength; i+=3) {
         let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
         if (val & 0x800000) val |= 0xFF000000;
@@ -134,118 +136,75 @@ function handleECG(e) {
         if(ecgDisplay.length > 600) ecgDisplay.shift();
         batch.push(val);
     }
-    saveEcgBinary(batch);
-}
-
-// Kompression: Speichert Startwert (32bit) + Deltas (16bit)
-function saveEcgBinary(batch) {
-    if (batch.length === 0) return;
-    const buffer = new ArrayBuffer(4 + (batch.length - 1) * 2);
-    const view = new DataView(buffer);
-    view.setInt32(0, batch[0], true);
-    
+    const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
+    const view = new DataView(buf);
+    view.setUint8(0, 0xEE); 
+    view.setInt32(1, batch[0], true);
     for(let i = 1; i < batch.length; i++) {
-        let delta = batch[i] - batch[i-1];
-        delta = Math.max(-32768, Math.min(32767, delta)); // Clamp to Int16
-        view.setInt16(4 + (i-1) * 2, delta, true);
+        view.setInt16(5 + (i-1) * 2, Math.max(-32768, Math.min(32767, batch[i]-batch[i-1])), true);
     }
-    db.samples.add({ timestamp: Date.now(), type: 'ECG_BIN', val: new Uint8Array(buffer) });
+    db.samples.add({ timestamp: Date.now(), type: 'ECG_BIN', val: new Uint8Array(buf) });
 }
 
 async function toggleECG() {
-    const btn = document.getElementById("ecgToggleBtn");
     const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
     const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
     const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
-
+    const btn = document.getElementById("ecgToggleBtn");
     if (!ecgActive) {
         await data.startNotifications();
         data.addEventListener('characteristicvaluechanged', handleECG);
         await ctrl.writeValue(new Uint8Array([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00]));
-        ecgActive = true;
-        btn.innerText = "EKG STOPPEN"; btn.style.backgroundColor = "#d32f2f";
+        ecgActive = true; btn.innerText = "EKG STOPPEN"; btn.style.background = "#d32f2f";
     } else {
         await ctrl.writeValue(new Uint8Array([0x03, 0x00])); 
-        ecgActive = false;
-        btn.innerText = "EKG STARTEN"; btn.style.backgroundColor = "#555";
+        ecgActive = false; btn.innerText = "EKG STARTEN"; btn.style.background = "#555";
     }
 }
 
-async function exportData() {
+async function exportRR() {
+    const data = await db.samples.where('type').equals('RR').toArray();
+    if (data.length === 0) return alert("Keine RR-Daten!");
+    let csv = "Timestamp;RR_ms\n" + data.map(r => `${r.timestamp};${r.val}`).join("\n");
+    shareFile(new Blob([csv], {type: 'text/csv'}), `RR_Data_${Date.now()}.csv`);
+}
+
+async function exportBinary() {
     const all = await db.samples.toArray();
     if (all.length === 0) return alert("Keine Daten!");
-
-    let csv = "Timestamp;Type;Value\n";
+    let parts = [];
     all.forEach(r => {
-        if(r.type === 'RR') {
-            csv += `${r.timestamp};RR;${r.val}\n`;
+        if (r.type === 'RR') {
+            const b = new ArrayBuffer(11);
+            const v = new DataView(b);
+            v.setUint8(0, 0xAA);
+            v.setFloat64(1, r.timestamp, true);
+            v.setUint16(9, r.val, true);
+            parts.push(new Uint8Array(b));
         } else if (r.type === 'ECG_BIN') {
-            const view = new DataView(r.val.buffer);
-            let val = view.getInt32(0, true);
-            csv += `${r.timestamp};ECG;${val}\n`;
-            for(let i=4; i < r.val.byteLength; i+=2) {
-                val += view.getInt16(i, true);
-                csv += `${r.timestamp};ECG;${val}\n`;
-            }
+            const tsBuf = new ArrayBuffer(8);
+            new DataView(tsBuf).setFloat64(0, r.timestamp, true);
+            parts.push(new Uint8Array(tsBuf));
+            parts.push(r.val);
         }
     });
-
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `Polar_Export_${Date.now()}.csv`;
-    a.click();
-    if(confirm("Datenbank leeren?")) db.samples.clear();
+    shareFile(new Blob(parts, {type: 'application/octet-stream'}), `Heart_Full_Data_${Date.now()}.bin`);
 }
 
-function importCSV(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        const lines = e.target.result.split("\n");
-        const importedRR = [];
-        const importedECG = [];
-        
-        for (let i = 1; i < lines.length; i++) {
-            const cols = lines[i].split(";");
-            if (cols.length < 3) continue;
-            if (cols[1] === "RR") importedRR.push(parseFloat(cols[2]));
-            if (cols[1] === "ECG") importedECG.push(parseFloat(cols[2]));
-        }
-
-        if (importedRR.length > 0) {
-            allRRData = importedRR;
-            rrDisplay = importedRR.slice(-150);
-            document.getElementById("rr-count").innerText = allRRData.length;
-            analyzeFullDataset(allRRData);
-        }
-        if (importedECG.length > 0) {
-            ecgDisplay = importedECG.slice(-600);
-            log("EKG Daten geladen.");
-        }
-        drawLorentz();
-    };
-    reader.readAsText(file);
-}
-
-function analyzeFullDataset(data) {
-    let diffs = [];
-    for(let i=1; i < data.length; i++) diffs.push(data[i] - data[i-1]);
-    let rmssd = Math.sqrt(diffs.reduce((a,b) => a + b*b, 0) / diffs.length);
-    let avgRR = data.reduce((x,y) => x + y) / data.length;
-    let stdRR = Math.sqrt(data.reduce((a,b) => a + Math.pow(b - avgRR, 2), 0) / data.length);
-    let sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
-    let sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(stdRR, 2) - 0.5 * Math.pow(rmssd, 2)));
-
-    document.getElementById("rmssd").innerText = rmssd.toFixed(1);
-    document.getElementById("sd1").innerText = sd1.toFixed(1);
-    document.getElementById("sd2").innerText = sd2.toFixed(1);
-    document.getElementById("bpm").innerText = Math.round(60000 / avgRR);
+async function shareFile(blob, name) {
+    const file = new File([blob], name, {type: blob.type});
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Polar Export' });
+    } else {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    }
 }
 
 function renderLoop() {
-  drawECG(); drawLorentz(); requestAnimationFrame(renderLoop);
+    drawECG();
+    drawLorentz();
+    requestAnimationFrame(renderLoop);
 }
 
 function drawECG() {
@@ -257,7 +216,7 @@ function drawECG() {
   ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 1.5;
   for(let i=0; i<ecgDisplay.length; i++) {
     const x = i * (canvas.width / ecgDisplay.length);
-    const y = 190 - ((ecgDisplay[i] - min) / range) * 180;
+    const y = 140 - ((ecgDisplay[i] - min) / range) * 130;
     if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
@@ -266,18 +225,27 @@ function drawECG() {
 function drawLorentz() {
   const canvas = document.getElementById("lorentzCanvas");
   const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height, padding = 30;
-  const plotW = w - padding, plotH = h - padding;
-  const data = allRRData.length > 2 ? allRRData : rrDisplay;
-  ctx.clearRect(0, 0, w, h);
-  ctx.strokeStyle = "#333"; ctx.strokeRect(padding, 0, plotW, plotH);
-  if (data.length < 2) return;
-  for (let i = 1; i < data.length; i++) {
-    const x = padding + ((data[i-1] - 400) / 1000) * plotW;
-    const y = plotH - ((data[i] - 400) / 1000) * plotH;
-    if(x >= padding && x <= w && y >= 0 && y <= plotH) {
-        ctx.fillStyle = "hsla(120, 100%, 50%, 0.5)";
-        ctx.beginPath(); ctx.arc(x, y, 2, 0, 7); ctx.fill();
+  const w = 400, p = 45, plotSize = 340;
+  ctx.clearRect(0, 0, w, w);
+  
+  // Achsen & Labels
+  ctx.strokeStyle = "#444"; ctx.lineWidth = 1;
+  ctx.strokeRect(p, 5, plotSize, plotSize);
+  ctx.fillStyle = "#888"; ctx.font = "12px Arial";
+  for(let v=400; v<=1400; v+=200) {
+    let pos = p + ((v-400)/1000) * plotSize;
+    ctx.fillText(v, pos-12, plotSize+25);
+    ctx.save(); ctx.translate(p-10, plotSize-((v-400)/1000)*plotSize); ctx.rotate(-Math.PI/2); ctx.fillText(v, -10, 0); ctx.restore();
+  }
+
+  // Gesamte Daten plotten
+  if (allRRData.length < 2) return;
+  ctx.fillStyle = "rgba(0, 255, 0, 0.25)"; // Transparenz für Dichte-Visualisierung
+  for (let i = 1; i < allRRData.length; i++) {
+    const x = p + ((allRRData[i-1] - 400) / 1000) * plotSize;
+    const y = plotSize - ((allRRData[i] - 400) / 1000) * plotSize;
+    if(x >= p && x <= (p + plotSize) && y >= 5 && y <= (5 + plotSize)) {
+        ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fill();
     }
   }
 }
