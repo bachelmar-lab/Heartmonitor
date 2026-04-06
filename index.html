@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.0 (Full Recovery & Sync)</title>
+<title>Polar H10 Monitor 3.1 (UI & Marker Fix)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -12,20 +12,20 @@
     .connect { background:#0f0; color:#000; }
     .btn-bin { background:#f80; color:#000; }
     .btn-import { background:#666; color:#fff; }
-    #status-box { display:flex; justify-content:space-between; font-size:12px; background:#111; padding:8px; border-radius:8px; margin-bottom:5px; }
+    #status-box { display:flex; justify-content:space-between; font-size:13px; background:#111; padding:10px; border-radius:8px; margin-bottom:5px; border: 1px solid #333; }
     .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin:10px 0; }
     .metric { background:#111; padding:10px; border-radius:10px; text-align:center; border: 1px solid #333; }
     .val { font-size:22px; font-weight:bold; color:#0f0; display:block; }
     .label { font-size:10px; color:#aaa; text-transform: uppercase; }
     canvas { background:#000; border-radius:10px; width:100%!important; border:1px solid #222; display:block; }
-    #scroll-container { margin: 15px 0; display:none; background:#111; padding:10px; border-radius:8px; }
-    input[type=range] { width: 100%; height: 35px; }
+    #scroll-container { margin: 15px 0; display:none; background:#111; padding:12px; border-radius:8px; border: 1px solid #444; }
+    input[type=range] { width: 100%; height: 40px; }
     #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:10px; height:60px; overflow-y:auto; padding:5px; margin-top:5px; border:1px solid #333; }
 </style>
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.0</h2>
+<h2>Polar H10 Monitor 3.1</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -47,7 +47,7 @@
 </div>
 
 <div id="scroll-container">
-    <div style="font-size:11px; color:#aaa; text-align:center; margin-bottom:5px;">EKG ZEITLEISTE (REVIEW)</div>
+    <div style="font-size:11px; color:#0f0; text-align:center; font-weight:bold;">HISTORIE DURCHSUCHEN</div>
     <input type="range" id="ekgScroll" min="0" value="0" oninput="updateScroll()">
 </div>
 
@@ -70,6 +70,10 @@ function log(msg) {
     l.scrollTop = l.scrollHeight;
 }
 
+function updateUI() {
+    document.getElementById("rr-count").innerText = allRRData.length;
+}
+
 function calculateGlobalHRV() {
     const d = allRRData.map(r => r.val).filter(v => v >= 350 && v <= 1500);
     if (d.length < 5) return;
@@ -87,7 +91,7 @@ function calculateGlobalHRV() {
     document.getElementById("sd1").innerText = sd1.toFixed(1);
     document.getElementById("sd2").innerText = sd2.toFixed(1);
     document.getElementById("bpm").innerText = Math.round(60000 / avg);
-    document.getElementById("rr-count").innerText = allRRData.length;
+    updateUI();
 }
 
 async function handleImport(event) {
@@ -101,7 +105,7 @@ async function handleImport(event) {
             const view = new DataView(buffer);
             allRRData = []; fullECG = [];
             let pos = 0;
-            log("Rekonstruiere Binärdaten...");
+            log("Binär-Rekonstruktion...");
             while (pos < buffer.byteLength) {
                 let type = view.getUint8(pos);
                 if (type === 0xAA) {
@@ -111,18 +115,18 @@ async function handleImport(event) {
                     let ts = view.getFloat64(pos, true); pos += 8;
                     if (view.getUint8(pos) === 0xEE) {
                         let lastVal = view.getInt32(pos + 1, true);
-                        fullECG.push({ ts, val: lastVal });
-                        pos += 5;
+                        fullECG.push({ ts, val: lastVal }); pos += 5;
                         while (pos + 1 < buffer.byteLength) {
                             if (view.getUint8(pos) === 0xAA || (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE)) break;
                             lastVal += view.getInt16(pos, true);
-                            fullECG.push({ ts, val: lastVal });
-                            pos += 2;
+                            fullECG.push({ ts, val: lastVal }); pos += 2;
                         }
                     }
                 } else pos++;
             }
-            initReviewMode();
+            document.getElementById("scroll-container").style.display = "block";
+            document.getElementById("ekgScroll").max = Math.max(0, fullECG.length - 600);
+            calculateGlobalHRV(); updateScroll();
         };
         reader.readAsArrayBuffer(file);
     } else {
@@ -134,24 +138,13 @@ async function handleImport(event) {
                 if (cols.length >= 2) {
                     let val = parseFloat(cols[cols.length-1].replace(',', '.'));
                     if (val > 3000) val = (val / 1024) * 1000; else if (val < 5) val *= 1000;
-                    if (val > 350 && val < 1500) allRRData.push({ ts: Date.now(), val });
+                    if (val > 300 && val < 2000) allRRData.push({ ts: Date.now(), val });
                 }
             });
-            log(allRRData.length + " RR-Punkte geladen.");
             calculateGlobalHRV(); drawLorentz();
         };
         reader.readAsText(file);
     }
-}
-
-function initReviewMode() {
-    document.getElementById("scroll-container").style.display = "block";
-    const slider = document.getElementById("ekgScroll");
-    slider.max = Math.max(0, fullECG.length - 600);
-    slider.value = 0;
-    log("Review bereit: " + fullECG.length + " EKG Proben.");
-    calculateGlobalHRV();
-    updateScroll();
 }
 
 function updateScroll() {
@@ -174,8 +167,9 @@ async function connect() {
         document.getElementById("status").innerText = "Verbunden";
         
         const bS = await server.getPrimaryService('battery_service');
-        const bV = await (await bS.getCharacteristic('battery_level')).readValue();
-        document.getElementById("batt").innerText = bV.getUint8(0);
+        const bChar = await bS.getCharacteristic('battery_level');
+        const bVal = await bChar.readValue();
+        document.getElementById("batt").innerText = bVal.getUint8(0);
         
         const hS = await server.getPrimaryService('heart_rate');
         const hC = await hS.getCharacteristic('heart_rate_measurement');
@@ -185,15 +179,13 @@ async function connect() {
             let offset = (v.getUint8(0) & 0x01) ? 3 : 2;
             for (let i = offset; i < v.byteLength; i += 2) {
                 const val = (v.getUint16(i, true) / 1024) * 1000;
-                if (val > 300) {
-                    allRRData.push({ ts: Date.now(), val });
-                    db.samples.add({ timestamp: Date.now(), type: 'RR', val });
-                    calculateGlobalHRV();
-                }
+                allRRData.push({ ts: Date.now(), val });
+                db.samples.add({ timestamp: Date.now(), type: 'RR', val });
+                calculateGlobalHRV();
             }
         });
         requestAnimationFrame(renderLoop);
-    } catch (e) { log("Verbindungsfehler: " + e.message); }
+    } catch (e) { log("Error: " + e.message); }
 }
 
 async function toggleECG() {
@@ -202,24 +194,29 @@ async function toggleECG() {
     const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
     if (!ecgActive) {
         await data.startNotifications();
-        data.addEventListener('characteristicvaluechanged', e => {
-            const dv = e.target.value;
-            const ts = Date.now(), batch = [];
+        data.oncharacteristicvaluechanged = (e) => {
+            const dv = e.target.value, ts = Date.now(), batch = [];
             for(let i=10; i < dv.byteLength; i+=3) {
                 let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
                 if (val & 0x800000) val |= 0xFF000000;
                 fullECG.push({ ts, val });
-                if (fullECG.length > 1000) fullECG.shift();
+                if (fullECG.length > 800) fullECG.shift();
                 batch.push(val);
             }
             const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
             const v = new DataView(buf); v.setUint8(0, 0xEE); v.setInt32(1, batch[0], true);
             for(let i=1; i<batch.length; i++) v.setInt16(5+(i-1)*2, batch[i]-batch[i-1], true);
             db.samples.add({ timestamp: ts, type: 'ECG_BIN', val: new Uint8Array(buf) });
-        });
+        };
         await ctrl.writeValue(new Uint8Array([0x02,0x00,0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]));
-        ecgActive = true; document.getElementById("ecgToggleBtn").innerText="EKG STOP";
+        ecgActive = true; 
+        document.getElementById("ecgToggleBtn").innerText="STOP";
         document.getElementById("status").innerText = "Live";
+    } else {
+        await ctrl.writeValue(new Uint8Array([0x03, 0x00]));
+        ecgActive = false;
+        document.getElementById("ecgToggleBtn").innerText="EKG STARTEN";
+        document.getElementById("status").innerText = "Verbunden";
     }
 }
 
@@ -248,7 +245,7 @@ function drawECG() {
   const data = ecgActive ? fullECG.slice(-600).map(e => e.val) : ecgDisplay;
   if (data.length < 2) return;
   let min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
-  ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 2;
   for(let i=0; i<data.length; i++) {
     const x = i * (canvas.width / data.length);
     const y = 150 - ((data[i] - min) / range) * 140;
@@ -268,22 +265,24 @@ function drawLorentz() {
         let pos = p + ((v-400)/1000) * size;
         ctx.fillText(v, pos-12, size+25);
     }
-    ctx.fillStyle = "rgba(0, 255, 0, 0.25)";
+    ctx.fillStyle = "rgba(0, 255, 0, 0.3)";
     for (let i = 1; i < allRRData.length; i++) {
         const x = p + ((allRRData[i-1].val - 400) / 1000) * size;
         const y = size - ((allRRData[i].val - 400) / 1000) * size;
         if(x >= p && x <= p+size && y >= 5 && y <= 5+size) {
-            ctx.beginPath(); ctx.arc(x, y, 1.2, 0, 7); ctx.fill();
+            ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fill();
         }
     }
     if (currentIndex > 0 && currentIndex < allRRData.length) {
         const x = p + ((allRRData[currentIndex-1].val - 400) / 1000) * size;
         const y = size - ((allRRData[currentIndex].val - 400) / 1000) * size;
-        ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fill();
-        ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.stroke();
+        ctx.shadowBlur = 10; ctx.shadowColor = "white";
+        ctx.fillStyle = "#ff0000"; ctx.beginPath(); ctx.arc(x, y, 8, 0, 7); ctx.fill();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
+        ctx.shadowBlur = 0;
     }
 }
-function renderLoop() { if(ecgActive) { drawECG(); drawLorentz(); } requestAnimationFrame(renderLoop); }
+function renderLoop() { if(ecgActive) { drawECG(); drawLorentz(); updateUI(); } requestAnimationFrame(renderLoop); }
 </script>
 </body>
 </html>
