@@ -2,42 +2,32 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 2.5 (Fixed Analytics)</title>
+<title>Polar H10 Monitor 2.7 (Legacy Data Fix)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
     body { background:#000; color:#fff; font-family:sans-serif; margin:0; padding:10px; }
-    h2 { text-align:center; color:#0f0; margin:5px 0; font-size: 20px; }
-    button { width:100%; padding:15px; margin:5px 0; font-size:16px; border:none; border-radius:10px; font-weight:bold; cursor:pointer; }
+    h2 { text-align:center; color:#0f0; margin:5px 0; font-size: 18px; }
+    button { width:100%; padding:14px; margin:4px 0; font-size:15px; border:none; border-radius:10px; font-weight:bold; cursor:pointer; }
     .connect { background:#0f0; color:#000; }
     .btn-rr { background:#44f; color:#fff; }
-    .btn-bin { background:#f80; color:#000; }
     .btn-import { background:#666; color:#fff; }
-    #status-box { background:#111; padding:10px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; font-size:13px; }
-    canvas { background:#050505; border-radius:10px; width:100%!important; border:1px solid #222; }
-    .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:10px 0; }
+    .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin:10px 0; }
     .metric { background:#111; padding:10px; border-radius:10px; text-align:center; border: 1px solid #333; }
-    .val { font-size:24px; font-weight:bold; color:#0f0; display:block; }
-    .label { font-size:11px; color:#aaa; text-transform: uppercase; }
-    #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:10px; height:60px; overflow-y:auto; border:1px solid #333; margin-top:10px; padding:5px; }
+    .val { font-size:22px; font-weight:bold; color:#0f0; display:block; }
+    .label { font-size:10px; color:#aaa; text-transform: uppercase; }
+    canvas { background:#000; border-radius:10px; width:100%!important; border:1px solid #222; }
+    #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:10px; height:50px; overflow-y:auto; padding:5px; margin-top:5px; }
 </style>
 </head>
 <body>
 
-<h2>Polar H10 Monitor 2.5</h2>
-
-<div id="status-box">
-  <span>Status: <b id="status">Bereit</b></span>
-  <span>Gesamt-RR: <b id="rr-count">0</b></span>
-  <span>Batt: <b id="batt">--</b>%</span>
-</div>
+<h2>Polar H10 Monitor 2.7</h2>
 
 <button class="connect" onclick="connect()">SENSOR VERBINDEN</button>
-<button id="ecgToggleBtn" onclick="toggleECG()" style="background:#555; color:#fff;">EKG STARTEN</button>
-<button class="btn-rr" onclick="exportRR()">NUR RR (CSV)</button>
-<button class="btn-bin" onclick="exportBinary()">RR + EKG (BINÄR)</button>
-<button class="btn-import" onclick="document.getElementById('fileInput').click()">CSV IMPORT (ANALYSE)</button>
+<button class="btn-import" onclick="document.getElementById('fileInput').click()">CSV IMPORT (ALTE DATEN FIX)</button>
 <input type="file" id="fileInput" style="display:none" accept=".csv" onchange="importCSV(event)">
+<button class="btn-rr" onclick="exportRR()">CLEAN EXPORT (CSV)</button>
 
 <div class="metrics-grid">
   <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Ø)</span></div>
@@ -46,18 +36,11 @@
   <div class="metric"><span id="sd2" class="val">--</span><span class="label">SD2 (ms)</span></div>
 </div>
 
-<canvas id="ecgCanvas" width="800" height="150"></canvas>
-<div style="text-align:center; margin-top:15px; color:#aaa; font-size:12px;">Lorentz Plot (Vollständiger Datensatz)</div>
-<canvas id="lorentzCanvas" width="400" height="400" style="width:320px!important; margin:5px auto; display:block;"></canvas>
-
+<canvas id="lorentzCanvas" width="400" height="400" style="width:320px!important; margin:10px auto; display:block;"></canvas>
 <div id="debug-log">> System bereit.</div>
 
 <script>
-const db = new Dexie("PolarDB");
-db.version(3).stores({ samples: "++id, timestamp, type" });
-
-let device, server, ecgActive = false;
-let allRRData = [], ecgDisplay = new Array(600).fill(0);
+let allRRData = [];
 
 function log(msg) {
     const l = document.getElementById("debug-log");
@@ -65,66 +48,27 @@ function log(msg) {
     l.scrollTop = l.scrollHeight;
 }
 
-async function connect() {
-    try {
-        device = await navigator.bluetooth.requestDevice({
-            filters: [{ services: ['heart_rate'] }],
-            optionalServices: ['battery_service', 'fb005c80-02e7-f387-1cad-8acd2d8df0c8']
-        });
-        server = await device.gatt.connect();
-        document.getElementById("status").innerText = "Verbunden";
-        const bS = await server.getPrimaryService('battery_service');
-        const bC = await bS.getCharacteristic('battery_level');
-        const bV = await bC.readValue();
-        document.getElementById("batt").innerText = bV.getUint8(0);
-        await startHR();
-        requestAnimationFrame(renderLoop);
-    } catch (e) { log("Error: " + e.message); }
-}
-
-async function startHR() {
-  const s = await server.getPrimaryService('heart_rate');
-  const c = await s.getCharacteristic('heart_rate_measurement');
-  await c.startNotifications();
-  c.addEventListener('characteristicvaluechanged', e => {
-    const v = e.target.value;
-    const flags = v.getUint8(0);
-    let offset = (flags & 0x01) ? 3 : 2;
-    for (let i = offset; i < v.byteLength; i += 2) {
-      const rr = (v.getUint16(i, true) / 1024) * 1000;
-      if (rr > 100 && rr < 3000) { // Validitätscheck
-        allRRData.push(rr);
-        document.getElementById("rr-count").innerText = allRRData.length;
-        db.samples.add({ timestamp: Date.now(), type: 'RR', val: rr });
-        calculateGlobalHRV();
-      }
-    }
-  });
-}
-
 function calculateGlobalHRV() {
-    if (allRRData.length < 5) return;
-    
-    // 1. RMSSD (Root Mean Square of Successive Differences)
-    let diffsSqSum = 0;
-    let count = 0;
-    for(let i=1; i < allRRData.length; i++) {
-        let d = allRRData[i] - allRRData[i-1];
-        diffsSqSum += d * d;
-        count++;
+    // Strenger Filter für die Statistik (350ms - 1500ms)
+    const d = allRRData.filter(v => v >= 350 && v <= 1500);
+    if (d.length < 5) return;
+
+    // RMSSD
+    let diffsSq = 0, count = 0;
+    for(let i=1; i < d.length; i++) {
+        let diff = d[i] - d[i-1];
+        if (Math.abs(diff) < 400) { // Plausibilitäts-Check für den Sprung
+            diffsSq += diff * diff;
+            count++;
+        }
     }
-    const rmssd = Math.sqrt(diffsSqSum / count);
+    const rmssd = Math.sqrt(diffsSq / (count || 1));
     
-    // 2. SD1 und SD2 (Poincaré Geometrie)
-    // SD1 = Standardabweichung senkrecht zur Identitätslinie (Kurzzeit-Variabilität)
-    // SD2 = Standardabweichung entlang der Identitätslinie (Langzeit-Variabilität)
-    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
-    
-    const avg = allRRData.reduce((a, b) => a + b) / allRRData.length;
-    const variance = allRRData.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / allRRData.length;
+    // SDNN & Poincaré
+    const avg = d.reduce((a, b) => a + b) / d.length;
+    const variance = d.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / d.length;
     const sdnn = Math.sqrt(variance);
-    
-    // Mathematische Beziehung: SDNN^2 = 0.5 * (SD1^2 + SD2^2)
+    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
     const sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
 
     document.getElementById("rmssd").innerText = rmssd.toFixed(1);
@@ -139,144 +83,66 @@ function importCSV(event) {
     const reader = new FileReader();
     reader.onload = function(e) {
         const lines = e.target.result.split("\n");
-        const importedRR = [];
-        log("Analysiere " + file.name + "...");
+        let temp = [];
+        log("Fixing Legacy Data...");
         
         for (let i = 1; i < lines.length; i++) {
-            const cols = lines[i].split(/[;,]/); // Erkennt Komma oder Semikolon
+            const cols = lines[i].split(/[;,]/);
             if (cols.length < 2) continue;
+            let raw = cols.length === 2 ? cols[1] : (cols[1].trim() === "RR" ? cols[2] : "");
+            if (!raw) continue;
+
+            let val = parseFloat(raw.replace(',', '.'));
             
-            let rawVal = cols.length === 2 ? cols[1] : (cols[1].trim() === "RR" ? cols[2] : null);
-            if (rawVal) {
-                let val = parseFloat(rawVal.replace(',', '.'));
-                if (!isNaN(val) && val > 0) {
-                    // AUTO-KORREKTUR: Wenn Wert < 5 ist, sind es Sekunden -> Umrechnen in ms
-                    if (val < 5) val = val * 1000;
-                    importedRR.push(val);
-                }
-            }
+            // LEGACY FIX LOGIC:
+            if (val > 3000) val = (val / 1024) * 1000; // Falls Rohwerte geloggt wurden
+            else if (val < 5) val *= 1000;              // Falls Sekunden geloggt wurden
+            
+            // Nur plausible menschliche RR-Intervalle (40-170 bpm)
+            if (val >= 350 && val <= 1500) temp.push(val);
         }
         
-        if (importedRR.length > 0) {
-            allRRData = importedRR;
-            document.getElementById("rr-count").innerText = allRRData.length;
-            calculateGlobalHRV();
-            drawLorentz();
-            log(allRRData.length + " RR-Werte (ms) geladen.");
-        }
+        allRRData = temp;
+        document.getElementById("debug-log").innerHTML = ""; // Clear log
+        log(allRRData.length + " Punkte bereinigt geladen.");
+        calculateGlobalHRV();
+        drawLorentz();
     };
     reader.readAsText(file);
 }
 
-function handleECG(e) {
-    if (!ecgActive) return;
-    const dv = e.target.value;
-    const batch = [];
-    for(let i=10; i < dv.byteLength; i+=3) {
-        let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
-        if (val & 0x800000) val |= 0xFF000000;
-        ecgDisplay.push(val);
-        if(ecgDisplay.length > 600) ecgDisplay.shift();
-        batch.push(val);
+function drawLorentz() {
+    const canvas = document.getElementById("lorentzCanvas");
+    const ctx = canvas.getContext("2d");
+    const w = 400, p = 45, size = 340;
+    ctx.clearRect(0, 0, w, w);
+    
+    // Achsen Zeichnen
+    ctx.strokeStyle = "#444"; ctx.strokeRect(p, 5, size, size);
+    ctx.fillStyle = "#888"; ctx.font = "12px Arial";
+    for(let v=400; v<=1400; v+=200) {
+        let pos = p + ((v-400)/1000) * size;
+        ctx.fillText(v, pos-12, size+25);
+        ctx.save(); ctx.translate(p-10, size-((v-400)/1000)*size); ctx.rotate(-Math.PI/2); ctx.fillText(v, -10, 0); ctx.restore();
     }
-    const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
-    const view = new DataView(buf);
-    view.setUint8(0, 0xEE); view.setInt32(1, batch[0], true);
-    for(let i = 1; i < batch.length; i++) {
-        view.setInt16(5 + (i-1) * 2, Math.max(-32768, Math.min(32767, batch[i]-batch[i-1])), true);
-    }
-    db.samples.add({ timestamp: Date.now(), type: 'ECG_BIN', val: new Uint8Array(buf) });
-}
 
-async function toggleECG() {
-    const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
-    const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
-    const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
-    const btn = document.getElementById("ecgToggleBtn");
-    if (!ecgActive) {
-        await data.startNotifications();
-        data.addEventListener('characteristicvaluechanged', handleECG);
-        await ctrl.writeValue(new Uint8Array([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00]));
-        ecgActive = true; btn.innerText = "EKG STOPPEN"; btn.style.background = "#d32f2f";
-    } else {
-        await ctrl.writeValue(new Uint8Array([0x03, 0x00])); 
-        ecgActive = false; btn.innerText = "EKG STARTEN"; btn.style.background = "#555";
+    // Daten Plotten (Transparenz für Wolkenbildung)
+    ctx.fillStyle = "rgba(0, 255, 0, 0.25)";
+    for (let i = 1; i < allRRData.length; i++) {
+        const x = p + ((allRRData[i-1] - 400) / 1000) * size;
+        const y = size - ((allRRData[i] - 400) / 1000) * size;
+        if(x >= p && x <= (p + size) && y >= 5 && y <= (5 + size)) {
+            ctx.beginPath(); ctx.arc(x, y, 1.2, 0, 7); ctx.fill();
+        }
     }
 }
 
 async function exportRR() {
-    const data = await db.samples.where('type').equals('RR').toArray();
-    if (data.length === 0) return alert("Keine RR-Daten!");
-    let csv = "Timestamp;RR_ms\n" + data.map(r => `${r.timestamp};${r.val}`).join("\n");
-    shareFile(new Blob([csv], {type: 'text/csv'}), `RR_Export_${Date.now()}.csv`);
-}
-
-async function exportBinary() {
-    const all = await db.samples.toArray();
-    if (all.length === 0) return alert("Keine Daten!");
-    let parts = [];
-    all.forEach(r => {
-        if (r.type === 'RR') {
-            const b = new ArrayBuffer(11); const v = new DataView(b);
-            v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
-            parts.push(new Uint8Array(b));
-        } else if (r.type === 'ECG_BIN') {
-            const tsBuf = new ArrayBuffer(8); new DataView(tsBuf).setFloat64(0, r.timestamp, true);
-            parts.push(new Uint8Array(tsBuf)); parts.push(r.val);
-        }
-    });
-    shareFile(new Blob(parts, {type: 'application/octet-stream'}), `Heart_Full_${Date.now()}.bin`);
-}
-
-async function shareFile(blob, name) {
-    const file = new File([blob], name, {type: blob.type});
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'Polar Export' });
-    } else {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob); a.download = name; a.click();
-    }
-}
-
-function renderLoop() { drawECG(); drawLorentz(); requestAnimationFrame(renderLoop); }
-
-function drawECG() {
-  const canvas = document.getElementById("ecgCanvas");
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  if (ecgDisplay.length < 2) return;
-  let min = Math.min(...ecgDisplay), max = Math.max(...ecgDisplay), range = (max - min) || 1000;
-  ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 1.5;
-  for(let i=0; i<ecgDisplay.length; i++) {
-    const x = i * (canvas.width / ecgDisplay.length);
-    const y = 140 - ((ecgDisplay[i] - min) / range) * 130;
-    if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-}
-
-function drawLorentz() {
-  const canvas = document.getElementById("lorentzCanvas");
-  const ctx = canvas.getContext("2d");
-  const w = 400, p = 45, plotSize = 340;
-  ctx.clearRect(0, 0, w, w);
-  ctx.strokeStyle = "#444"; ctx.lineWidth = 1;
-  ctx.strokeRect(p, 5, plotSize, plotSize);
-  ctx.fillStyle = "#888"; ctx.font = "12px Arial";
-  for(let v=400; v<=1400; v+=200) {
-    let pos = p + ((v-400)/1000) * plotSize;
-    ctx.fillText(v, pos-12, plotSize+25);
-    ctx.save(); ctx.translate(p-10, plotSize-((v-400)/1000)*plotSize); ctx.rotate(-Math.PI/2); ctx.fillText(v, -10, 0); ctx.restore();
-  }
-  if (allRRData.length < 2) return;
-  ctx.fillStyle = "rgba(0, 255, 0, 0.25)";
-  for (let i = 1; i < allRRData.length; i++) {
-    const x = p + ((allRRData[i-1] - 400) / 1000) * plotSize;
-    const y = plotSize - ((allRRData[i] - 400) / 1000) * plotSize;
-    if(x >= p && x <= (p + plotSize) && y >= 5 && y <= (5 + plotSize)) {
-        ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fill();
-    }
-  }
+    if (allRRData.length === 0) return alert("Keine Daten!");
+    let csv = "Timestamp;RR_ms\n" + allRRData.map((v, i) => `${Date.now()+i};${v.toFixed(1)}`).join("\n");
+    const blob = new Blob([csv], {type: 'text/csv'});
+    const file = new File([blob], `Clean_RR_${Date.now()}.csv`, {type: 'text/csv'});
+    if (navigator.share) await navigator.share({ files: [file] });
 }
 </script>
 </body>
