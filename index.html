@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 2.3 (Global Analytics)</title>
+<title>Polar H10 Monitor 2.4 (Global Analytics & Import)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -12,6 +12,7 @@
     .connect { background:#0f0; color:#000; }
     .btn-rr { background:#44f; color:#fff; }
     .btn-bin { background:#f80; color:#000; }
+    .btn-import { background:#666; color:#fff; }
     #status-box { background:#111; padding:10px; border-radius:10px; margin-bottom:10px; display:flex; justify-content:space-between; font-size:13px; }
     canvas { background:#050505; border-radius:10px; width:100%!important; border:1px solid #222; }
     .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:10px 0; }
@@ -23,7 +24,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 2.3</h2>
+<h2>Polar H10 Monitor 2.4</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -35,16 +36,18 @@
 <button id="ecgToggleBtn" onclick="toggleECG()" style="background:#555; color:#fff;">EKG STARTEN</button>
 <button class="btn-rr" onclick="exportRR()">NUR RR (CSV)</button>
 <button class="btn-bin" onclick="exportBinary()">RR + EKG (BINÄR)</button>
+<button class="btn-import" onclick="document.getElementById('fileInput').click()">CSV IMPORT (ANALYSE)</button>
+<input type="file" id="fileInput" style="display:none" accept=".csv" onchange="importCSV(event)">
 
 <div class="metrics-grid">
-  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Live)</span></div>
+  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Durchschn.)</span></div>
   <div class="metric"><span id="rmssd" class="val">--</span><span class="label">RMSSD (Gesamt)</span></div>
   <div class="metric"><span id="sd1" class="val">--</span><span class="label">SD1 (ms)</span></div>
   <div class="metric"><span id="sd2" class="val">--</span><span class="label">SD2 (ms)</span></div>
 </div>
 
 <canvas id="ecgCanvas" width="800" height="150"></canvas>
-<div style="text-align:center; margin-top:15px; color:#aaa; font-size:12px;">Lorentz Plot (Gesamte Messung)</div>
+<div style="text-align:center; margin-top:15px; color:#aaa; font-size:12px;">Lorentz Plot (Vollständiger Datensatz)</div>
 <canvas id="lorentzCanvas" width="400" height="400" style="width:320px!important; margin:5px auto; display:block;"></canvas>
 
 <div id="debug-log">> System bereit.</div>
@@ -70,12 +73,10 @@ async function connect() {
         });
         server = await device.gatt.connect();
         document.getElementById("status").innerText = "Verbunden";
-        
         const bS = await server.getPrimaryService('battery_service');
         const bC = await bS.getCharacteristic('battery_level');
         const bV = await bC.readValue();
         document.getElementById("batt").innerText = bV.getUint8(0);
-
         await startHR();
         requestAnimationFrame(renderLoop);
     } catch (e) { log("Error: " + e.message); }
@@ -104,25 +105,18 @@ async function startHR() {
 
 function calculateGlobalHRV() {
     if (allRRData.length < 5) return;
-    
-    // RMSSD (Gesamt)
     let diffsSq = 0;
-    for(let i=1; i < allRRData.length; i++) {
-        diffsSq += Math.pow(allRRData[i] - allRRData[i-1], 2);
-    }
+    for(let i=1; i < allRRData.length; i++) diffsSq += Math.pow(allRRData[i] - allRRData[i-1], 2);
     const rmssd = Math.sqrt(diffsSq / (allRRData.length - 1));
-    
-    // SDNN & Poincaré (SD1/SD2)
     const avg = allRRData.reduce((a, b) => a + b) / allRRData.length;
     const variance = allRRData.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / allRRData.length;
     const sdnn = Math.sqrt(variance);
-    
     const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
     const sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
-
     document.getElementById("rmssd").innerText = rmssd.toFixed(1);
     document.getElementById("sd1").innerText = sd1.toFixed(1);
     document.getElementById("sd2").innerText = sd2.toFixed(1);
+    document.getElementById("bpm").innerText = Math.round(60000 / avg);
 }
 
 function handleECG(e) {
@@ -166,7 +160,7 @@ async function exportRR() {
     const data = await db.samples.where('type').equals('RR').toArray();
     if (data.length === 0) return alert("Keine RR-Daten!");
     let csv = "Timestamp;RR_ms\n" + data.map(r => `${r.timestamp};${r.val}`).join("\n");
-    shareFile(new Blob([csv], {type: 'text/csv'}), `RR_Data_${Date.now()}.csv`);
+    shareFile(new Blob([csv], {type: 'text/csv'}), `RR_Export_${Date.now()}.csv`);
 }
 
 async function exportBinary() {
@@ -175,20 +169,41 @@ async function exportBinary() {
     let parts = [];
     all.forEach(r => {
         if (r.type === 'RR') {
-            const b = new ArrayBuffer(11);
-            const v = new DataView(b);
-            v.setUint8(0, 0xAA);
-            v.setFloat64(1, r.timestamp, true);
-            v.setUint16(9, r.val, true);
+            const b = new ArrayBuffer(11); const v = new DataView(b);
+            v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
             parts.push(new Uint8Array(b));
         } else if (r.type === 'ECG_BIN') {
-            const tsBuf = new ArrayBuffer(8);
-            new DataView(tsBuf).setFloat64(0, r.timestamp, true);
-            parts.push(new Uint8Array(tsBuf));
-            parts.push(r.val);
+            const tsBuf = new ArrayBuffer(8); new DataView(tsBuf).setFloat64(0, r.timestamp, true);
+            parts.push(new Uint8Array(tsBuf)); parts.push(r.val);
         }
     });
-    shareFile(new Blob(parts, {type: 'application/octet-stream'}), `Heart_Full_Data_${Date.now()}.bin`);
+    shareFile(new Blob(parts, {type: 'application/octet-stream'}), `Heart_Full_${Date.now()}.bin`);
+}
+
+function importCSV(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const lines = e.target.result.split("\n");
+        const importedRR = [];
+        log("Importiere " + file.name + "...");
+        for (let i = 1; i < lines.length; i++) {
+            const cols = lines[i].split(";");
+            if (cols.length < 2) continue;
+            // Erkennt sowohl reines RR-CSV als auch kombiniertes CSV
+            let val = cols.length === 2 ? parseFloat(cols[1]) : (cols[1] === "RR" ? parseFloat(cols[2]) : null);
+            if (val && !isNaN(val)) importedRR.push(val);
+        }
+        if (importedRR.length > 0) {
+            allRRData = importedRR;
+            document.getElementById("rr-count").innerText = allRRData.length;
+            calculateGlobalHRV();
+            drawLorentz();
+            log(allRRData.length + " RR-Werte geladen.");
+        }
+    };
+    reader.readAsText(file);
 }
 
 async function shareFile(blob, name) {
@@ -201,11 +216,7 @@ async function shareFile(blob, name) {
     }
 }
 
-function renderLoop() {
-    drawECG();
-    drawLorentz();
-    requestAnimationFrame(renderLoop);
-}
+function renderLoop() { drawECG(); drawLorentz(); requestAnimationFrame(renderLoop); }
 
 function drawECG() {
   const canvas = document.getElementById("ecgCanvas");
@@ -227,8 +238,6 @@ function drawLorentz() {
   const ctx = canvas.getContext("2d");
   const w = 400, p = 45, plotSize = 340;
   ctx.clearRect(0, 0, w, w);
-  
-  // Achsen & Labels
   ctx.strokeStyle = "#444"; ctx.lineWidth = 1;
   ctx.strokeRect(p, 5, plotSize, plotSize);
   ctx.fillStyle = "#888"; ctx.font = "12px Arial";
@@ -237,10 +246,8 @@ function drawLorentz() {
     ctx.fillText(v, pos-12, plotSize+25);
     ctx.save(); ctx.translate(p-10, plotSize-((v-400)/1000)*plotSize); ctx.rotate(-Math.PI/2); ctx.fillText(v, -10, 0); ctx.restore();
   }
-
-  // Gesamte Daten plotten
   if (allRRData.length < 2) return;
-  ctx.fillStyle = "rgba(0, 255, 0, 0.25)"; // Transparenz für Dichte-Visualisierung
+  ctx.fillStyle = "rgba(0, 255, 0, 0.25)";
   for (let i = 1; i < allRRData.length; i++) {
     const x = p + ((allRRData[i-1] - 400) / 1000) * plotSize;
     const y = plotSize - ((allRRData[i] - 400) / 1000) * plotSize;
