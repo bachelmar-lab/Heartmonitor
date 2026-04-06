@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 2.4 (Global Analytics & Import)</title>
+<title>Polar H10 Monitor 2.5 (Fixed Analytics)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -24,7 +24,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 2.4</h2>
+<h2>Polar H10 Monitor 2.5</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -40,8 +40,8 @@
 <input type="file" id="fileInput" style="display:none" accept=".csv" onchange="importCSV(event)">
 
 <div class="metrics-grid">
-  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Durchschn.)</span></div>
-  <div class="metric"><span id="rmssd" class="val">--</span><span class="label">RMSSD (Gesamt)</span></div>
+  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Ø)</span></div>
+  <div class="metric"><span id="rmssd" class="val">--</span><span class="label">RMSSD (ms)</span></div>
   <div class="metric"><span id="sd1" class="val">--</span><span class="label">SD1 (ms)</span></div>
   <div class="metric"><span id="sd2" class="val">--</span><span class="label">SD2 (ms)</span></div>
 </div>
@@ -90,10 +90,9 @@ async function startHR() {
     const v = e.target.value;
     const flags = v.getUint8(0);
     let offset = (flags & 0x01) ? 3 : 2;
-    document.getElementById("bpm").innerText = v.getUint8(1);
     for (let i = offset; i < v.byteLength; i += 2) {
       const rr = (v.getUint16(i, true) / 1024) * 1000;
-      if (rr > 0) {
+      if (rr > 100 && rr < 3000) { // Validitätscheck
         allRRData.push(rr);
         document.getElementById("rr-count").innerText = allRRData.length;
         db.samples.add({ timestamp: Date.now(), type: 'RR', val: rr });
@@ -105,18 +104,68 @@ async function startHR() {
 
 function calculateGlobalHRV() {
     if (allRRData.length < 5) return;
-    let diffsSq = 0;
-    for(let i=1; i < allRRData.length; i++) diffsSq += Math.pow(allRRData[i] - allRRData[i-1], 2);
-    const rmssd = Math.sqrt(diffsSq / (allRRData.length - 1));
+    
+    // 1. RMSSD (Root Mean Square of Successive Differences)
+    let diffsSqSum = 0;
+    let count = 0;
+    for(let i=1; i < allRRData.length; i++) {
+        let d = allRRData[i] - allRRData[i-1];
+        diffsSqSum += d * d;
+        count++;
+    }
+    const rmssd = Math.sqrt(diffsSqSum / count);
+    
+    // 2. SD1 und SD2 (Poincaré Geometrie)
+    // SD1 = Standardabweichung senkrecht zur Identitätslinie (Kurzzeit-Variabilität)
+    // SD2 = Standardabweichung entlang der Identitätslinie (Langzeit-Variabilität)
+    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+    
     const avg = allRRData.reduce((a, b) => a + b) / allRRData.length;
     const variance = allRRData.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / allRRData.length;
     const sdnn = Math.sqrt(variance);
-    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+    
+    // Mathematische Beziehung: SDNN^2 = 0.5 * (SD1^2 + SD2^2)
     const sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
+
     document.getElementById("rmssd").innerText = rmssd.toFixed(1);
     document.getElementById("sd1").innerText = sd1.toFixed(1);
     document.getElementById("sd2").innerText = sd2.toFixed(1);
     document.getElementById("bpm").innerText = Math.round(60000 / avg);
+}
+
+function importCSV(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const lines = e.target.result.split("\n");
+        const importedRR = [];
+        log("Analysiere " + file.name + "...");
+        
+        for (let i = 1; i < lines.length; i++) {
+            const cols = lines[i].split(/[;,]/); // Erkennt Komma oder Semikolon
+            if (cols.length < 2) continue;
+            
+            let rawVal = cols.length === 2 ? cols[1] : (cols[1].trim() === "RR" ? cols[2] : null);
+            if (rawVal) {
+                let val = parseFloat(rawVal.replace(',', '.'));
+                if (!isNaN(val) && val > 0) {
+                    // AUTO-KORREKTUR: Wenn Wert < 5 ist, sind es Sekunden -> Umrechnen in ms
+                    if (val < 5) val = val * 1000;
+                    importedRR.push(val);
+                }
+            }
+        }
+        
+        if (importedRR.length > 0) {
+            allRRData = importedRR;
+            document.getElementById("rr-count").innerText = allRRData.length;
+            calculateGlobalHRV();
+            drawLorentz();
+            log(allRRData.length + " RR-Werte (ms) geladen.");
+        }
+    };
+    reader.readAsText(file);
 }
 
 function handleECG(e) {
@@ -132,8 +181,7 @@ function handleECG(e) {
     }
     const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
     const view = new DataView(buf);
-    view.setUint8(0, 0xEE); 
-    view.setInt32(1, batch[0], true);
+    view.setUint8(0, 0xEE); view.setInt32(1, batch[0], true);
     for(let i = 1; i < batch.length; i++) {
         view.setInt16(5 + (i-1) * 2, Math.max(-32768, Math.min(32767, batch[i]-batch[i-1])), true);
     }
@@ -178,32 +226,6 @@ async function exportBinary() {
         }
     });
     shareFile(new Blob(parts, {type: 'application/octet-stream'}), `Heart_Full_${Date.now()}.bin`);
-}
-
-function importCSV(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        const lines = e.target.result.split("\n");
-        const importedRR = [];
-        log("Importiere " + file.name + "...");
-        for (let i = 1; i < lines.length; i++) {
-            const cols = lines[i].split(";");
-            if (cols.length < 2) continue;
-            // Erkennt sowohl reines RR-CSV als auch kombiniertes CSV
-            let val = cols.length === 2 ? parseFloat(cols[1]) : (cols[1] === "RR" ? parseFloat(cols[2]) : null);
-            if (val && !isNaN(val)) importedRR.push(val);
-        }
-        if (importedRR.length > 0) {
-            allRRData = importedRR;
-            document.getElementById("rr-count").innerText = allRRData.length;
-            calculateGlobalHRV();
-            drawLorentz();
-            log(allRRData.length + " RR-Werte geladen.");
-        }
-    };
-    reader.readAsText(file);
 }
 
 async function shareFile(blob, name) {
