@@ -1,288 +1,166 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-<meta charset="UTF-8">
-<title>Polar H10 Monitor 3.1 (UI & Marker Fix)</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
-<style>
-    body { background:#000; color:#fff; font-family:sans-serif; margin:0; padding:10px; }
-    h2 { text-align:center; color:#0f0; margin:5px 0; font-size: 18px; }
-    button { width:100%; padding:14px; margin:4px 0; font-size:15px; border:none; border-radius:10px; font-weight:bold; cursor:pointer; }
-    .connect { background:#0f0; color:#000; }
-    .btn-bin { background:#f80; color:#000; }
-    .btn-import { background:#666; color:#fff; }
-    #status-box { display:flex; justify-content:space-between; font-size:13px; background:#111; padding:10px; border-radius:8px; margin-bottom:5px; border: 1px solid #333; }
-    .metrics-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin:10px 0; }
-    .metric { background:#111; padding:10px; border-radius:10px; text-align:center; border: 1px solid #333; }
-    .val { font-size:22px; font-weight:bold; color:#0f0; display:block; }
-    .label { font-size:10px; color:#aaa; text-transform: uppercase; }
-    canvas { background:#000; border-radius:10px; width:100%!important; border:1px solid #222; display:block; }
-    #scroll-container { margin: 15px 0; display:none; background:#111; padding:12px; border-radius:8px; border: 1px solid #444; }
-    input[type=range] { width: 100%; height: 40px; }
-    #debug-log { background:#111; color:#0f0; font-family:monospace; font-size:10px; height:60px; overflow-y:auto; padding:5px; margin-top:5px; border:1px solid #333; }
-</style>
+    <meta charset="UTF-8">
+    <title>Polar H10 - VHF Detektor & Delta-Log</title>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 20px; background: #f0f2f5; color: #333; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .full { grid-column: span 2; }
+        .btn { background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .btn:disabled { background: #ccc; }
+        #status-indicator { padding: 10px; border-radius: 6px; font-weight: bold; text-align: center; margin-top: 10px; }
+        .normal { background: #d4edda; color: #155724; }
+        .warning { background: #f8d7da; color: #721c24; animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0.6; } }
+        #ekgPlot { height: 250px; }
+    </style>
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.1</h2>
-
-<div id="status-box">
-  <span>Status: <b id="status">Bereit</b></span>
-  <span>Punkte: <b id="rr-count">0</b></span>
-  <span>Batt: <b id="batt">--</b>%</span>
+<div class="card full">
+    <h2>Polar H10 Monitoring</h2>
+    <button id="btnConnect" class="btn">H10 Verbinden</button>
+    <button id="btnSave" class="btn" disabled>Daten-Export (.bin)</button>
+    <div id="status-indicator" class="normal">System bereit - Bitte Gurt verbinden</div>
 </div>
 
-<button class="connect" onclick="connect()">SENSOR VERBINDEN</button>
-<button id="ecgToggleBtn" onclick="toggleECG()" style="background:#555; color:#fff;">EKG STARTEN</button>
-<button class="btn-bin" onclick="exportBinary()">SPEICHERN (BINÄR)</button>
-<button class="btn-import" onclick="document.getElementById('fileInput').click()">BINÄR / CSV IMPORT</button>
-<input type="file" id="fileInput" style="display:none" onchange="handleImport(event)">
-
-<div class="metrics-grid">
-  <div class="metric"><span id="bpm" class="val">--</span><span class="label">Puls (Ø)</span></div>
-  <div class="metric"><span id="rmssd" class="val">--</span><span class="label">RMSSD (ms)</span></div>
-  <div class="metric"><span id="sd1" class="val">--</span><span class="label">SD1 (ms)</span></div>
-  <div class="metric"><span id="sd2" class="val">--</span><span class="label">SD2 (ms)</span></div>
+<div class="grid">
+    <div class="card">
+        <h3>Lorentz-Plot (Poincaré)</h3>
+        <div id="lorentzPlot"></div>
+    </div>
+    <div class="card">
+        <h3>Live-Statistik & Analyse</h3>
+        <p>RR-Intervall: <span id="rr-val" style="font-size: 1.2em; font-weight: bold;">--</span> ms</p>
+        <p>RMSSD (HRV): <span id="rmssd-val">--</span> ms</p>
+        <hr>
+        <h4>VHF-Screening</h4>
+        <p id="vhf-status">Analyse läuft...</p>
+        <small>Hinweis: Eine hohe Streuung im Plot und ein RMSSD > 100ms im Ruhezustand können auf Vorhofflimmern hindeuten.</small>
+    </div>
+    <div class="card full">
+        <h3>EKG Live-Stream (130 Hz)</h3>
+        <div id="ekgPlot"></div>
+    </div>
 </div>
-
-<div id="scroll-container">
-    <div style="font-size:11px; color:#0f0; text-align:center; font-weight:bold;">HISTORIE DURCHSUCHEN</div>
-    <input type="range" id="ekgScroll" min="0" value="0" oninput="updateScroll()">
-</div>
-
-<canvas id="ecgCanvas" width="800" height="160"></canvas>
-<canvas id="lorentzCanvas" width="400" height="400" style="width:320px!important; margin:15px auto;"></canvas>
-
-<div id="debug-log">> System bereit.</div>
 
 <script>
-const db = new Dexie("PolarDB");
-db.version(3).stores({ samples: "++id, timestamp, type" });
+let ekgBuffer = []; 
+let rrIntervals = [];
+let rawBinaryData = []; // Für den Delta-Export
 
-let device, server, ecgActive = false;
-let allRRData = [], fullECG = [], ecgDisplay = [];
-let currentIndex = -1;
+const SERVICE_UUID = "fb005c80-02e7-f387-1cad-8acd2d8df0c8"; 
+const CONTROL_POINT_CHAR = "fb005c81-02e7-f387-1cad-8acd2d8df0c8";
+const DATA_CHAR = "fb005c82-02e7-f387-1cad-8acd2d8df0c8";
 
-function log(msg) {
-    const l = document.getElementById("debug-log");
-    l.innerHTML += "> " + msg + "<br>";
-    l.scrollTop = l.scrollHeight;
-}
-
-function updateUI() {
-    document.getElementById("rr-count").innerText = allRRData.length;
-}
-
-function calculateGlobalHRV() {
-    const d = allRRData.map(r => r.val).filter(v => v >= 350 && v <= 1500);
-    if (d.length < 5) return;
-    let diffsSq = 0, count = 0;
-    for(let i=1; i < d.length; i++) {
-        let diff = d[i] - d[i-1];
-        if (Math.abs(diff) < 450) { diffsSq += diff * diff; count++; }
-    }
-    const rmssd = Math.sqrt(diffsSq / (count || 1));
-    const avg = d.reduce((a, b) => a + b) / d.length;
-    const sdnn = Math.sqrt(d.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / d.length);
-    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2)), sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
-
-    document.getElementById("rmssd").innerText = rmssd.toFixed(1);
-    document.getElementById("sd1").innerText = sd1.toFixed(1);
-    document.getElementById("sd2").innerText = sd2.toFixed(1);
-    document.getElementById("bpm").innerText = Math.round(60000 / avg);
-    updateUI();
-}
-
-async function handleImport(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    
-    if (file.name.endsWith('.bin')) {
-        reader.onload = async (e) => {
-            const buffer = e.target.result;
-            const view = new DataView(buffer);
-            allRRData = []; fullECG = [];
-            let pos = 0;
-            log("Binär-Rekonstruktion...");
-            while (pos < buffer.byteLength) {
-                let type = view.getUint8(pos);
-                if (type === 0xAA) {
-                    allRRData.push({ ts: view.getFloat64(pos + 1, true), val: view.getUint16(pos + 9, true) });
-                    pos += 11;
-                } else if (pos + 8 < buffer.byteLength) {
-                    let ts = view.getFloat64(pos, true); pos += 8;
-                    if (view.getUint8(pos) === 0xEE) {
-                        let lastVal = view.getInt32(pos + 1, true);
-                        fullECG.push({ ts, val: lastVal }); pos += 5;
-                        while (pos + 1 < buffer.byteLength) {
-                            if (view.getUint8(pos) === 0xAA || (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE)) break;
-                            lastVal += view.getInt16(pos, true);
-                            fullECG.push({ ts, val: lastVal }); pos += 2;
-                        }
-                    }
-                } else pos++;
-            }
-            document.getElementById("scroll-container").style.display = "block";
-            document.getElementById("ekgScroll").max = Math.max(0, fullECG.length - 600);
-            calculateGlobalHRV(); updateScroll();
-        };
-        reader.readAsArrayBuffer(file);
-    } else {
-        reader.onload = (e) => {
-            const lines = e.target.result.split("\n");
-            allRRData = [];
-            lines.forEach(line => {
-                const cols = line.split(/[;,]/);
-                if (cols.length >= 2) {
-                    let val = parseFloat(cols[cols.length-1].replace(',', '.'));
-                    if (val > 3000) val = (val / 1024) * 1000; else if (val < 5) val *= 1000;
-                    if (val > 300 && val < 2000) allRRData.push({ ts: Date.now(), val });
-                }
-            });
-            calculateGlobalHRV(); drawLorentz();
-        };
-        reader.readAsText(file);
-    }
-}
-
-function updateScroll() {
-    const start = parseInt(document.getElementById("ekgScroll").value);
-    ecgDisplay = fullECG.slice(start, start + 600).map(e => e.val);
-    if (fullECG[start]) {
-        const t = fullECG[start].ts;
-        currentIndex = allRRData.findIndex(r => r.ts >= t);
-    }
-    drawECG(); drawLorentz();
-}
-
-async function connect() {
+document.getElementById('btnConnect').onclick = async () => {
     try {
-        device = await navigator.bluetooth.requestDevice({
-            filters: [{ services: ['heart_rate'] }],
-            optionalServices: ['battery_service', 'fb005c80-02e7-f387-1cad-8acd2d8df0c8']
+        const device = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'Polar H10' }],
+            optionalServices: [SERVICE_UUID, 'heart_rate']
         });
-        server = await device.gatt.connect();
-        document.getElementById("status").innerText = "Verbunden";
+        const server = await device.gatt.connect();
         
-        const bS = await server.getPrimaryService('battery_service');
-        const bChar = await bS.getCharacteristic('battery_level');
-        const bVal = await bChar.readValue();
-        document.getElementById("batt").innerText = bVal.getUint8(0);
+        const pmdService = await server.getPrimaryService(SERVICE_UUID);
+        const controlChar = await pmdService.getCharacteristic(CONTROL_POINT_CHAR);
+        const dataChar = await pmdService.getCharacteristic(DATA_CHAR);
         
-        const hS = await server.getPrimaryService('heart_rate');
-        const hC = await hS.getCharacteristic('heart_rate_measurement');
-        await hC.startNotifications();
-        hC.addEventListener('characteristicvaluechanged', e => {
-            const v = e.target.value;
-            let offset = (v.getUint8(0) & 0x01) ? 3 : 2;
-            for (let i = offset; i < v.byteLength; i += 2) {
-                const val = (v.getUint16(i, true) / 1024) * 1000;
-                allRRData.push({ ts: Date.now(), val });
-                db.samples.add({ timestamp: Date.now(), type: 'RR', val });
-                calculateGlobalHRV();
+        await dataChar.startNotifications();
+        dataChar.addEventListener('characteristicvaluechanged', (e) => {
+            const val = e.target.value;
+            for (let i = 10; i < val.byteLength; i += 3) {
+                let sample = (val.getUint8(i) | (val.getUint8(i+1) << 8) | (val.getUint8(i+2) << 16));
+                if (sample & 0x800000) sample |= 0xFF000000; 
+                ekgBuffer.push(sample);
+                
+                // Delta-Kompression für Export vorbereiten
+                if (ekgBuffer.length === 1) {
+                    // Erster Wert als 32-bit Int speichern
+                    const view = new DataView(new ArrayBuffer(4));
+                    view.setInt32(0, sample, true);
+                    rawBinaryData.push(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+                } else {
+                    let delta = sample - ekgBuffer[ekgBuffer.length - 2];
+                    // Wir begrenzen das Delta auf ein Byte (-128 bis 127)
+                    rawBinaryData.push(Math.max(-128, Math.min(127, delta)));
+                }
+            }
+            if(ekgBuffer.length % 13 == 0) updateEkgPlot();
+            if(ekgBuffer.length > 1000) ekgBuffer.splice(0, 100); 
+        });
+
+        const startEkg = new Uint8Array([0x01, 0x00, 0x01, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00]);
+        await controlChar.writeValue(startEkg);
+
+        const hrService = await server.getPrimaryService('heart_rate');
+        const hrChar = await hrService.getCharacteristic('heart_rate_measurement');
+        await hrChar.startNotifications();
+        hrChar.addEventListener('characteristicvaluechanged', (e) => {
+            let flags = e.target.value.getUint8(0);
+            let offset = 2;
+            for (; offset + 1 < e.target.value.byteLength; offset += 2) {
+                let rr = (e.target.value.getUint16(offset, true) / 1024) * 1000;
+                if(rr > 300 && rr < 2000) { // Plausibilitätscheck
+                    rrIntervals.push(rr);
+                    updateLorentzAndStats();
+                }
             }
         });
-        requestAnimationFrame(renderLoop);
-    } catch (e) { log("Error: " + e.message); }
+
+        document.getElementById('status-indicator').innerText = "Verbunden mit " + device.name;
+        document.getElementById('btnSave').disabled = false;
+    } catch (e) { console.error(e); }
+};
+
+function updateEkgPlot() {
+    const trace = { y: ekgBuffer.slice(-400), type: 'scatter', line: {color: '#d63031', width: 1.5} };
+    const layout = { margin: {t:10, b:30, l:40, r:10}, xaxis: {showgrid: false}, yaxis: {showgrid: true} };
+    Plotly.newPlot('ekgPlot', [trace], layout, {staticPlot: true});
 }
 
-async function toggleECG() {
-    const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
-    const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
-    const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
-    if (!ecgActive) {
-        await data.startNotifications();
-        data.oncharacteristicvaluechanged = (e) => {
-            const dv = e.target.value, ts = Date.now(), batch = [];
-            for(let i=10; i < dv.byteLength; i+=3) {
-                let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
-                if (val & 0x800000) val |= 0xFF000000;
-                fullECG.push({ ts, val });
-                if (fullECG.length > 800) fullECG.shift();
-                batch.push(val);
-            }
-            const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
-            const v = new DataView(buf); v.setUint8(0, 0xEE); v.setInt32(1, batch[0], true);
-            for(let i=1; i<batch.length; i++) v.setInt16(5+(i-1)*2, batch[i]-batch[i-1], true);
-            db.samples.add({ timestamp: ts, type: 'ECG_BIN', val: new Uint8Array(buf) });
-        };
-        await ctrl.writeValue(new Uint8Array([0x02,0x00,0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]));
-        ecgActive = true; 
-        document.getElementById("ecgToggleBtn").innerText="STOP";
-        document.getElementById("status").innerText = "Live";
+function updateLorentzAndStats() {
+    if (rrIntervals.length < 5) return;
+    
+    const lastRR = rrIntervals[rrIntervals.length - 1];
+    document.getElementById('rr-val').innerText = Math.round(lastRR);
+
+    // RMSSD Berechnung
+    let diffs = [];
+    for(let i=1; i<rrIntervals.length; i++) diffs.push(Math.pow(rrIntervals[i] - rrIntervals[i-1], 2));
+    const rmssd = Math.sqrt(diffs.reduce((a,b) => a+b) / diffs.length);
+    document.getElementById('rmssd-val').innerText = rmssd.toFixed(1);
+
+    // VHF Logik: RMSSD > 100ms im Ruhemodus ist ein starker Indikator
+    const vhfStatus = document.getElementById('vhf-status');
+    const indicator = document.getElementById('status-indicator');
+    
+    if (rmssd > 100 && rrIntervals.length > 15) {
+        vhfStatus.innerHTML = "<b style='color:red;'>WARNUNG: Hohe Unregelmäßigkeit detektiert.</b>";
+        indicator.className = "warning";
+        indicator.innerText = "ACHTUNG: Verdacht auf Vorhofflimmern";
     } else {
-        await ctrl.writeValue(new Uint8Array([0x03, 0x00]));
-        ecgActive = false;
-        document.getElementById("ecgToggleBtn").innerText="EKG STARTEN";
-        document.getElementById("status").innerText = "Verbunden";
+        vhfStatus.innerText = "Rhythmus stabil.";
+        indicator.className = "normal";
+        indicator.innerText = "Monitoring aktiv - Signal ok";
     }
+
+    const x = rrIntervals.slice(-50, -1);
+    const y = rrIntervals.slice(-49);
+    Plotly.newPlot('lorentzPlot', [{
+        x: x, y: y, mode: 'markers', marker: {size: 6, color: '#0984e3'}
+    }], { margin: {t:10, r:10, b:40, l:40}, xaxis: {range:[300, 1500]}, yaxis: {range:[300, 1500]} });
 }
 
-async function exportBinary() {
-    const all = await db.samples.toArray();
-    let parts = [];
-    all.forEach(r => {
-        if (r.type === 'RR') {
-            const b = new ArrayBuffer(11); const v = new DataView(b);
-            v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
-            parts.push(new Uint8Array(b));
-        } else if (r.type === 'ECG_BIN') {
-            const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
-            parts.push(new Uint8Array(tsB)); parts.push(r.val);
-        }
-    });
-    const blob = new Blob(parts, {type: 'application/octet-stream'});
-    const file = new File([blob], `Session_${Date.now()}.bin`);
-    if (navigator.share) await navigator.share({ files: [file] });
-}
-
-function drawECG() {
-  const canvas = document.getElementById("ecgCanvas");
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  const data = ecgActive ? fullECG.slice(-600).map(e => e.val) : ecgDisplay;
-  if (data.length < 2) return;
-  let min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
-  ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 2;
-  for(let i=0; i<data.length; i++) {
-    const x = i * (canvas.width / data.length);
-    const y = 150 - ((data[i] - min) / range) * 140;
-    if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-}
-
-function drawLorentz() {
-    const canvas = document.getElementById("lorentzCanvas");
-    const ctx = canvas.getContext("2d");
-    const w = 400, p = 45, size = 340;
-    ctx.clearRect(0, 0, w, w);
-    ctx.strokeStyle = "#444"; ctx.strokeRect(p, 5, size, size);
-    ctx.fillStyle = "#888"; ctx.font = "12px Arial";
-    for(let v=400; v<=1400; v+=200) {
-        let pos = p + ((v-400)/1000) * size;
-        ctx.fillText(v, pos-12, size+25);
-    }
-    ctx.fillStyle = "rgba(0, 255, 0, 0.3)";
-    for (let i = 1; i < allRRData.length; i++) {
-        const x = p + ((allRRData[i-1].val - 400) / 1000) * size;
-        const y = size - ((allRRData[i].val - 400) / 1000) * size;
-        if(x >= p && x <= p+size && y >= 5 && y <= 5+size) {
-            ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fill();
-        }
-    }
-    if (currentIndex > 0 && currentIndex < allRRData.length) {
-        const x = p + ((allRRData[currentIndex-1].val - 400) / 1000) * size;
-        const y = size - ((allRRData[currentIndex].val - 400) / 1000) * size;
-        ctx.shadowBlur = 10; ctx.shadowColor = "white";
-        ctx.fillStyle = "#ff0000"; ctx.beginPath(); ctx.arc(x, y, 8, 0, 7); ctx.fill();
-        ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
-        ctx.shadowBlur = 0;
-    }
-}
-function renderLoop() { if(ecgActive) { drawECG(); drawLorentz(); updateUI(); } requestAnimationFrame(renderLoop); }
+document.getElementById('btnSave').onclick = () => {
+    const blob = new Blob([new Int8Array(rawBinaryData)], {type: "application/octet-stream"});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `H10_FullLog_${new Date().toISOString().slice(0,16)}.bin`;
+    a.click();
+};
 </script>
 </body>
 </html>
