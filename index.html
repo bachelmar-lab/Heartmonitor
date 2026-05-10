@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.0 (Full Recovery & Sync)</title>
+<title>Polar H10 Monitor 3.1 (Fixed Delta & Sync)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.0</h2>
+<h2>Polar H10 Monitor 3.1</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -36,7 +36,7 @@
 <button class="connect" onclick="connect()">SENSOR VERBINDEN</button>
 <button id="ecgToggleBtn" onclick="toggleECG()" style="background:#555; color:#fff;">EKG STARTEN</button>
 <button class="btn-bin" onclick="exportBinary()">SPEICHERN (BINÄR)</button>
-<button class="btn-import" onclick="document.getElementById('fileInput').click()">BINÄR / CSV IMPORT</button>
+<button class="btn-import" onclick="document.getElementById('fileInput').click()">IMPORT</button>
 <input type="file" id="fileInput" style="display:none" onchange="handleImport(event)">
 
 <div class="metrics-grid">
@@ -70,18 +70,24 @@ function log(msg) {
     l.scrollTop = l.scrollHeight;
 }
 
+// Zentrale HRV Berechnung
 function calculateGlobalHRV() {
-    const d = allRRData.map(r => r.val).filter(v => v >= 350 && v <= 1500);
+    const d = allRRData.map(r => r.val).filter(v => v >= 300 && v <= 1600);
     if (d.length < 5) return;
+    
     let diffsSq = 0, count = 0;
     for(let i=1; i < d.length; i++) {
         let diff = d[i] - d[i-1];
-        if (Math.abs(diff) < 450) { diffsSq += diff * diff; count++; }
+        diffsSq += diff * diff;
+        count++;
     }
-    const rmssd = Math.sqrt(diffsSq / (count || 1));
+    const rmssd = Math.sqrt(diffsSq / count);
     const avg = d.reduce((a, b) => a + b) / d.length;
     const sdnn = Math.sqrt(d.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / d.length);
-    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2)), sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
+    
+    // SD1/SD2 Geometrie
+    const sd1 = Math.sqrt(0.5 * Math.pow(rmssd, 2));
+    const sd2 = Math.sqrt(Math.max(0, 2 * Math.pow(sdnn, 2) - Math.pow(sd1, 2)));
 
     document.getElementById("rmssd").innerText = rmssd.toFixed(1);
     document.getElementById("sd1").innerText = sd1.toFixed(1);
@@ -90,58 +96,54 @@ function calculateGlobalHRV() {
     document.getElementById("rr-count").innerText = allRRData.length;
 }
 
+// FIX: Robusterer Binär-Parser
 async function handleImport(event) {
     const file = event.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     
-    if (file.name.endsWith('.bin')) {
-        reader.onload = async (e) => {
-            const buffer = e.target.result;
-            const view = new DataView(buffer);
-            allRRData = []; fullECG = [];
-            let pos = 0;
-            log("Rekonstruiere Binärdaten...");
-            while (pos < buffer.byteLength) {
-                let type = view.getUint8(pos);
-                if (type === 0xAA) {
-                    allRRData.push({ ts: view.getFloat64(pos + 1, true), val: view.getUint16(pos + 9, true) });
-                    pos += 11;
-                } else if (pos + 8 < buffer.byteLength) {
-                    let ts = view.getFloat64(pos, true); pos += 8;
-                    if (view.getUint8(pos) === 0xEE) {
-                        let lastVal = view.getInt32(pos + 1, true);
+    reader.onload = async (e) => {
+        const buffer = e.target.result;
+        const view = new DataView(buffer);
+        allRRData = []; fullECG = [];
+        let pos = 0;
+        log("Importiere " + file.name + "...");
+
+        while (pos < buffer.byteLength) {
+            let marker = view.getUint8(pos);
+            
+            if (marker === 0xAA) { // RR-Punkt
+                let ts = view.getFloat64(pos + 1, true);
+                let val = view.getUint16(pos + 9, true);
+                allRRData.push({ ts, val });
+                pos += 11;
+            } else {
+                // EKG Block: 8 Byte TS + 0xEE Markierung
+                let ts = view.getFloat64(pos, true);
+                if (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE) {
+                    let lastVal = view.getInt32(pos + 9, true);
+                    fullECG.push({ ts, val: lastVal });
+                    pos += 13;
+                    
+                    // Folge-Deltas lesen bis nächster Header
+                    while (pos + 1 < buffer.byteLength) {
+                        // Prüfen ob nächster Block beginnt (0xAA oder neuer Zeitstempel-Block)
+                        if (view.getUint8(pos) === 0xAA) break;
+                        if (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE) break;
+                        
+                        lastVal += view.getInt16(pos, true);
                         fullECG.push({ ts, val: lastVal });
-                        pos += 5;
-                        while (pos + 1 < buffer.byteLength) {
-                            if (view.getUint8(pos) === 0xAA || (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE)) break;
-                            lastVal += view.getInt16(pos, true);
-                            fullECG.push({ ts, val: lastVal });
-                            pos += 2;
-                        }
+                        pos += 2;
                     }
-                } else pos++;
-            }
-            initReviewMode();
-        };
-        reader.readAsArrayBuffer(file);
-    } else {
-        reader.onload = (e) => {
-            const lines = e.target.result.split("\n");
-            allRRData = [];
-            lines.forEach(line => {
-                const cols = line.split(/[;,]/);
-                if (cols.length >= 2) {
-                    let val = parseFloat(cols[cols.length-1].replace(',', '.'));
-                    if (val > 3000) val = (val / 1024) * 1000; else if (val < 5) val *= 1000;
-                    if (val > 350 && val < 1500) allRRData.push({ ts: Date.now(), val });
+                } else {
+                    pos++;
                 }
-            });
-            log(allRRData.length + " RR-Punkte geladen.");
-            calculateGlobalHRV(); drawLorentz();
-        };
-        reader.readAsText(file);
-    }
+            }
+        }
+        log(fullECG.length + " EKG Proben rekonstruiert.");
+        initReviewMode();
+    };
+    reader.readAsArrayBuffer(file);
 }
 
 function initReviewMode() {
@@ -149,16 +151,18 @@ function initReviewMode() {
     const slider = document.getElementById("ekgScroll");
     slider.max = Math.max(0, fullECG.length - 600);
     slider.value = 0;
-    log("Review bereit: " + fullECG.length + " EKG Proben.");
     calculateGlobalHRV();
     updateScroll();
 }
 
 function updateScroll() {
     const start = parseInt(document.getElementById("ekgScroll").value);
-    ecgDisplay = fullECG.slice(start, start + 600).map(e => e.val);
-    if (fullECG[start]) {
-        const t = fullECG[start].ts;
+    const segment = fullECG.slice(start, start + 600);
+    ecgDisplay = segment.map(e => e.val);
+    
+    if (segment[0]) {
+        // Roten Punkt im Lorentz-Plot auf aktuellen Zeitpunkt setzen
+        const t = segment[0].ts;
         currentIndex = allRRData.findIndex(r => r.ts >= t);
     }
     drawECG(); drawLorentz();
@@ -186,39 +190,50 @@ async function connect() {
             for (let i = offset; i < v.byteLength; i += 2) {
                 const val = (v.getUint16(i, true) / 1024) * 1000;
                 if (val > 300) {
-                    allRRData.push({ ts: Date.now(), val });
-                    db.samples.add({ timestamp: Date.now(), type: 'RR', val });
+                    const ts = Date.now();
+                    allRRData.push({ ts, val });
+                    db.samples.add({ timestamp: ts, type: 'RR', val });
                     calculateGlobalHRV();
                 }
             }
         });
         requestAnimationFrame(renderLoop);
-    } catch (e) { log("Verbindungsfehler: " + e.message); }
+    } catch (e) { log("Verbindung verloren."); }
 }
 
 async function toggleECG() {
     const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
     const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
     const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
+    
     if (!ecgActive) {
         await data.startNotifications();
         data.addEventListener('characteristicvaluechanged', e => {
             const dv = e.target.value;
-            const ts = Date.now(), batch = [];
+            const ts = Date.now();
+            const batch = [];
+            
             for(let i=10; i < dv.byteLength; i+=3) {
                 let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
                 if (val & 0x800000) val |= 0xFF000000;
                 fullECG.push({ ts, val });
-                if (fullECG.length > 1000) fullECG.shift();
                 batch.push(val);
+                if (fullECG.length > 2000) fullECG.shift();
             }
+            
+            // Delta-Encoding für DB
             const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
-            const v = new DataView(buf); v.setUint8(0, 0xEE); v.setInt32(1, batch[0], true);
-            for(let i=1; i<batch.length; i++) v.setInt16(5+(i-1)*2, batch[i]-batch[i-1], true);
+            const v = new DataView(buf);
+            v.setUint8(0, 0xEE); // Marker
+            v.setInt32(1, batch[0], true); // Absoluter Startwert
+            for(let i=1; i<batch.length; i++) {
+                v.setInt16(5 + (i-1)*2, batch[i] - batch[i-1], true);
+            }
             db.samples.add({ timestamp: ts, type: 'ECG_BIN', val: new Uint8Array(buf) });
         });
         await ctrl.writeValue(new Uint8Array([0x02,0x00,0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]));
-        ecgActive = true; document.getElementById("ecgToggleBtn").innerText="EKG STOP";
+        ecgActive = true; 
+        document.getElementById("ecgToggleBtn").innerText="STOP";
         document.getElementById("status").innerText = "Live";
     }
 }
@@ -233,25 +248,31 @@ async function exportBinary() {
             parts.push(new Uint8Array(b));
         } else if (r.type === 'ECG_BIN') {
             const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
-            parts.push(new Uint8Array(tsB)); parts.push(r.val);
+            parts.push(new Uint8Array(tsB));
+            parts.push(r.val);
         }
     });
     const blob = new Blob(parts, {type: 'application/octet-stream'});
-    const file = new File([blob], `Session_${Date.now()}.bin`);
-    if (navigator.share) await navigator.share({ files: [file] });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `H10_Session_${Date.now()}.bin`;
+    a.click();
 }
 
 function drawECG() {
   const canvas = document.getElementById("ecgCanvas");
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0,0,canvas.width,canvas.height);
+  
   const data = ecgActive ? fullECG.slice(-600).map(e => e.val) : ecgDisplay;
   if (data.length < 2) return;
+
+  // Dynamische Skalierung
   let min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
   ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 1.5;
   for(let i=0; i<data.length; i++) {
     const x = i * (canvas.width / data.length);
-    const y = 150 - ((data[i] - min) / range) * 140;
+    const y = canvas.height - 10 - ((data[i] - min) / range) * (canvas.height - 20);
     if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
@@ -260,30 +281,36 @@ function drawECG() {
 function drawLorentz() {
     const canvas = document.getElementById("lorentzCanvas");
     const ctx = canvas.getContext("2d");
-    const w = 400, p = 45, size = 340;
+    const w = 400, p = 40, size = 320;
     ctx.clearRect(0, 0, w, w);
-    ctx.strokeStyle = "#444"; ctx.strokeRect(p, 5, size, size);
-    ctx.fillStyle = "#888"; ctx.font = "12px Arial";
-    for(let v=400; v<=1400; v+=200) {
-        let pos = p + ((v-400)/1000) * size;
-        ctx.fillText(v, pos-12, size+25);
-    }
-    ctx.fillStyle = "rgba(0, 255, 0, 0.25)";
+    
+    // Achsen
+    ctx.strokeStyle = "#333";
+    ctx.strokeRect(p, p, size, size);
+    
+    // Datenpunkte
+    ctx.fillStyle = "rgba(0, 255, 0, 0.3)";
     for (let i = 1; i < allRRData.length; i++) {
-        const x = p + ((allRRData[i-1].val - 400) / 1000) * size;
-        const y = size - ((allRRData[i].val - 400) / 1000) * size;
-        if(x >= p && x <= p+size && y >= 5 && y <= 5+size) {
-            ctx.beginPath(); ctx.arc(x, y, 1.2, 0, 7); ctx.fill();
+        const x = p + ((allRRData[i-1].val - 300) / 1300) * size;
+        const y = p + size - ((allRRData[i].val - 300) / 1300) * size;
+        if(x >= p && x <= p+size && y >= p && y <= p+size) {
+            ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fill();
         }
     }
-    if (currentIndex > 0 && currentIndex < allRRData.length) {
-        const x = p + ((allRRData[currentIndex-1].val - 400) / 1000) * size;
-        const y = size - ((allRRData[currentIndex].val - 400) / 1000) * size;
+    
+    // Review-Marker (Rot)
+    if (currentIndex >= 1 && currentIndex < allRRData.length) {
+        const x = p + ((allRRData[currentIndex-1].val - 300) / 1300) * size;
+        const y = p + size - ((allRRData[currentIndex].val - 300) / 1300) * size;
         ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fill();
-        ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.stroke();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
     }
 }
-function renderLoop() { if(ecgActive) { drawECG(); drawLorentz(); } requestAnimationFrame(renderLoop); }
+
+function renderLoop() { 
+    if(ecgActive) { drawECG(); drawLorentz(); } 
+    requestAnimationFrame(renderLoop); 
+}
 </script>
 </body>
 </html>
