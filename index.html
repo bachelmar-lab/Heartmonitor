@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.5 (Fixed Save -> Share on Iphone)</title>
+<title>Polar H10 Monitor 3.6 (Fixed Save -> Share on Iphone)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.5</h2>
+<h2>Polar H10 Monitor 3.6</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -273,9 +273,17 @@ async function toggleECG() {
 async function exportBinary() {
     log("Bereite Export vor...");
     try {
-        // Sicherstellen, dass Dexie alle Daten geladen hat
-        const all = await db.samples.toArray();
-        if (all.length === 0) {
+        // FIX 1: Warte explizit darauf, dass ALLE ausstehenden Schreiboperationen 
+        // in der IndexedDB komplett abgeschlossen sind.
+        await db.open(); 
+        
+        // Wir lesen die Daten in einer isolierten, schreibgeschützten Transaktion,
+        // um den aktuellsten Live-Zustand zu garantieren.
+        const all = await db.transaction('r', db.samples, async () => {
+            return await db.samples.toArray();
+        });
+
+        if (!all || all.length === 0) {
             log("Keine Daten zum Speichern vorhanden.");
             return;
         }
@@ -294,66 +302,49 @@ async function exportBinary() {
         });
         
         const blob = new Blob(parts, {type: 'application/octet-stream'});
+        // Zeitstempel JETZT generieren, damit der Dateiname immer eindeutig ist
         const vorgeschlagenerName = `H10_Session_${Date.now()}.bin`;
 
-        // PRÜFUNG: Unterstützt der Browser das "Speichern unter"-Menü? (File System Access API)
         if (window.showSaveFilePicker) {
             log("Öffne Speicher-Menü...");
             const options = {
                 suggestedName: vorgeschlagenerName,
-                types: [{
-                    description: 'Polar H10 Binärdatei',
-                    accept: { 'application/octet-stream': ['.bin'] }
-                }]
+                types: [{ description: 'Polar H10 Binärdatei', accept: { 'application/octet-stream': ['.bin'] } }]
             };
-            
-            // Das öffnet das native Betriebssystem-Menü ("Speichern unter")
             const handle = await window.showSaveFilePicker(options);
             const writable = await handle.createWritable();
             await writable.write(blob);
             await writable.close();
-            
-            log("Datei erfolgreich am gewählten Ort gespeichert.");
+            log("Datei erfolgreich gespeichert.");
         } else {
-            // OPTIMIERT FÜR IPHONE / BLUEFY & IOS WEBKIT BUG
-            log("iOS erkannt. Bereite Teilen vor...");
-            
+            log("iOS erkannt. Bereite aktuellen Datensatz vor...");
             try {
-                // BUGFIX: Wir deklarieren den Typ als 'text/plain', damit iOS den Export nicht blockiert.
-                // Die Dateiendung bleibt trotzdem '.bin'!
                 const file = new File([blob], vorgeschlagenerName, { type: 'text/plain' });
                 
-                // BUGFIX 2: Nur das 'files'-Array übergeben – OHNE 'title' oder 'text'
                 if (navigator.canShare && navigator.canShare({ files: [file] })) {
                     log("Öffne iOS Teilen-Menü...");
-                    await navigator.share({
-                        files: [file]
-                    });
+                    await navigator.share({ files: [file] });
                     log("Erfolgreich geteilt/gesichert.");
                 } else {
-                    throw new Error("System erlaubt das Teilen von Dateien nicht.");
+                    throw new Error("Teilen nicht erlaubt.");
                 }
             } catch (shareError) {
                 console.error(shareError);
-                log("Teilen blockiert. Erzwinge automatischen Download...");
-                
-                // Letzter Not-Fallback (schreibt direkt in den 'Downloads'-Ordner der Dateien-App)
+                log("Teilen blockiert. Erzwinge Download...");
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
-                a.href = url; 
-                a.download = vorgeschlagenerName;
+                a.href = url; a.download = vorgeschlagenerName;
                 a.click();
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-                log("In 'Downloads' (Dateien-App) abgelegt.");
+                // FIX 2: Sofortige Freigabe der URL, damit iOS den Cache leert
+                setTimeout(() => URL.revokeObjectURL(url), 100);
+                log("In 'Downloads' abgelegt.");
             }
-        } 
-
+        }
     } catch (err) {
-        // Wenn der Benutzer im Menü auf "Abbrechen" klickt, landen wir hier
         if (err.name === 'AbortError') {
-            log("Speichervorgang vom Benutzer abgebrochen.");
+            log("Speichervorgang abgebrochen.");
         } else {
-            log("Export-Fehler.");
+            log("Export-Fehler: " + err.message);
             console.error(err);
         }
     }
