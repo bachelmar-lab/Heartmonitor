@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.4 (Fixed Save -> Share on Iphone)</title>
+<title>Polar H10 Monitor 3.5 (Fixed Save -> Share on Iphone)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.4</h2>
+<h2>Polar H10 Monitor 3.5</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -314,32 +314,40 @@ async function exportBinary() {
             await writable.close();
             
             log("Datei erfolgreich am gewählten Ort gespeichert.");
-  
         } else {
-            // OPTIMIERT FÜR IPHONE / BLUEFY: Nutzt das iOS Share-Menü
-            log("iOS erkannt. Öffne Teilen-Menü...");
+            // OPTIMIERT FÜR IPHONE / BLUEFY & IOS WEBKIT BUG
+            log("iOS erkannt. Bereite Teilen vor...");
             
-            // Wir erstellen ein echtes File-Objekt aus dem Blob
-            const file = new File([blob], vorgeschlagenerName, { type: 'application/octet-stream' });
-            
-            // Prüfen, ob das System Dateien teilen kann (Navigator.share)
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                await navigator.share({
-                    files: [file],
-                    title: 'Polar H10 Export',
-                    text: 'Hier ist deine EKG-Sitzung'
-                });
-                log("Teilen-Menü erfolgreich geschlossen.");
-            } else {
-                // Letzter Not-Fallback, falls Teilen blockiert ist
+            try {
+                // BUGFIX: Wir deklarieren den Typ als 'text/plain', damit iOS den Export nicht blockiert.
+                // Die Dateiendung bleibt trotzdem '.bin'!
+                const file = new File([blob], vorgeschlagenerName, { type: 'text/plain' });
+                
+                // BUGFIX 2: Nur das 'files'-Array übergeben – OHNE 'title' oder 'text'
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    log("Öffne iOS Teilen-Menü...");
+                    await navigator.share({
+                        files: [file]
+                    });
+                    log("Erfolgreich geteilt/gesichert.");
+                } else {
+                    throw new Error("System erlaubt das Teilen von Dateien nicht.");
+                }
+            } catch (shareError) {
+                console.error(shareError);
+                log("Teilen blockiert. Erzwinge automatischen Download...");
+                
+                // Letzter Not-Fallback (schreibt direkt in den 'Downloads'-Ordner der Dateien-App)
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
-                a.href = url; a.download = vorgeschlagenerName;
+                a.href = url; 
+                a.download = vorgeschlagenerName;
                 a.click();
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
-                log("In 'Downloads' der Dateien-App gespeichert.");
+                log("In 'Downloads' (Dateien-App) abgelegt.");
             }
-        }
+        } 
+
     } catch (err) {
         // Wenn der Benutzer im Menü auf "Abbrechen" klickt, landen wir hier
         if (err.name === 'AbortError') {
