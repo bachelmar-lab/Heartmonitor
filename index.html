@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.6 (Fixed Save -> Share on Iphone)</title>
+<title>Polar H10 Monitor 3.7 (Fixed Save -> Share on Iphone)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.6</h2>
+<h2>Polar H10 Monitor 3.7</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -270,84 +270,96 @@ async function toggleECG() {
     }
 }
 
-async function exportBinary() {
-    log("Bereite Export vor...");
-    try {
-        // FIX 1: Warte explizit darauf, dass ALLE ausstehenden Schreiboperationen 
-        // in der IndexedDB komplett abgeschlossen sind.
-        await db.open(); 
-        
-        // Wir lesen die Daten in einer isolierten, schreibgeschützten Transaktion,
-        // um den aktuellsten Live-Zustand zu garantieren.
-        const all = await db.transaction('r', db.samples, async () => {
-            return await db.samples.toArray();
-        });
-
-        if (!all || all.length === 0) {
-            log("Keine Daten zum Speichern vorhanden.");
-            return;
+// Hilfsfunktion: Wandelt DB-Inhalt synchron in ein File-Objekt um
+function prepareFileFromData(allData, dateName) {
+    let parts = [];
+    allData.forEach(r => {
+        if (r.type === 'RR') {
+            const b = new ArrayBuffer(11); const v = new DataView(b);
+            v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
+            parts.push(new Uint8Array(b));
+        } else if (r.type === 'ECG_BIN') {
+            const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
+            parts.push(new Uint8Array(tsB));
+            parts.push(r.val);
         }
+    });
+    const blob = new Blob(parts, {type: 'application/octet-stream'});
+    return new File([blob], dateName, { type: 'text/plain' });
+}
 
-        let parts = [];
-        all.forEach(r => {
-            if (r.type === 'RR') {
-                const b = new ArrayBuffer(11); const v = new DataView(b);
-                v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
-                parts.push(new Uint8Array(b));
-            } else if (r.type === 'ECG_BIN') {
-                const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
-                parts.push(new Uint8Array(tsB));
-                parts.push(r.val);
-            }
-        });
-        
-        const blob = new Blob(parts, {type: 'application/octet-stream'});
-        // Zeitstempel JETZT generieren, damit der Dateiname immer eindeutig ist
-        const vorgeschlagenerName = `H10_Session_${Date.now()}.bin`;
+async function exportBinary() {
+    log("Lese Datenbank aus...");
+    
+    // 1. SCHRITT: Daten holen BEVOR das Klick-Zeitfenster abläuft
+    let all;
+    try {
+        await db.open();
+        all = await db.samples.toArray();
+    } catch (dbErr) {
+        log("Datenbank-Fehler beim Lesen.");
+        return;
+    }
 
-        if (window.showSaveFilePicker) {
-            log("Öffne Speicher-Menü...");
-            const options = {
+    if (!all || all.length === 0) {
+        log("Keine Daten zum Speichern vorhanden.");
+        return;
+    }
+
+    const vorgeschlagenerName = `H10_Session_${Date.now()}.bin`;
+
+    // 2. SCHRITT: Falls Desktop-Browser (Chrome/Edge), direkt "Speichern unter" nutzen
+    if (window.showSaveFilePicker) {
+        log("Öffne Speicher-Menü...");
+        try {
+            const file = prepareFileFromData(all, vorgeschlagenerName);
+            const handle = await window.showSaveFilePicker({
                 suggestedName: vorgeschlagenerName,
                 types: [{ description: 'Polar H10 Binärdatei', accept: { 'application/octet-stream': ['.bin'] } }]
-            };
-            const handle = await window.showSaveFilePicker(options);
+            });
             const writable = await handle.createWritable();
-            await writable.write(blob);
+            await writable.write(file);
             await writable.close();
             log("Datei erfolgreich gespeichert.");
-        } else {
-            log("iOS erkannt. Bereite aktuellen Datensatz vor...");
-            try {
-                const file = new File([blob], vorgeschlagenerName, { type: 'text/plain' });
-                
-                if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                    log("Öffne iOS Teilen-Menü...");
-                    await navigator.share({ files: [file] });
-                    log("Erfolgreich geteilt/gesichert.");
-                } else {
-                    throw new Error("Teilen nicht erlaubt.");
-                }
-            } catch (shareError) {
-                console.error(shareError);
-                log("Teilen blockiert. Erzwinge Download...");
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = vorgeschlagenerName;
-                a.click();
-                // FIX 2: Sofortige Freigabe der URL, damit iOS den Cache leert
-                setTimeout(() => URL.revokeObjectURL(url), 100);
-                log("In 'Downloads' abgelegt.");
-            }
-        }
-    } catch (err) {
-        if (err.name === 'AbortError') {
-            log("Speichervorgang abgebrochen.");
-        } else {
-            log("Export-Fehler: " + err.message);
-            console.error(err);
+            return;
+        } catch(e) { 
+            log("Abgebrochen oder Fehler."); 
+            return; 
         }
     }
+
+    // 3. SCHRITT: FÜR IPHONE / BLUEFY
+    // Wir bereiten die Datei blitzschnell vor
+    const file = prepareFileFromData(all, vorgeschlagenerName);
+
+    log("Rufe iOS Teilen-Menü auf...");
+    // Da wir jetzt keine 'awaits' mehr vor dem share() haben, klappt das Menü sofort auf!
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+            await navigator.share({ files: [file] });
+            log("Erfolgreich exportiert!");
+        } catch (shareError) {
+            if (shareError.name === 'AbortError') {
+                log("Teilen vom Nutzer abgebrochen.");
+            } else {
+                log("iOS hat das Teilen verweigert.");
+                forceDownloadFallback(file, vorgeschlagenerName);
+            }
+        }
+    } else {
+        log("Teilen nicht unterstützt. Erzwinge Download...");
+        forceDownloadFallback(file, vorgeschlagenerName);
+    }
+}
+
+// Separater Fallback, um den Hauptcode sauber zu halten
+function forceDownloadFallback(file, name) {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 200);
+    log("In 'Downloads' (Dateien-App) abgelegt.");
 }
 
 function drawECG() {
