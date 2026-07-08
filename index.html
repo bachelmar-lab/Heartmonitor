@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.1 (Fixed Delta & Sync)</title>
+<title>Polar H10 Monitor 3.2 (Fixed Save & Stop)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -63,6 +63,8 @@ db.version(3).stores({ samples: "++id, timestamp, type" });
 let device, server, ecgActive = false;
 let allRRData = [], fullECG = [], ecgDisplay = [];
 let currentIndex = -1;
+let dataCharacteristic = null; // Globale Referenz zum Stoppen merken
+let ctrlCharacteristic = null; // Globale Referenz für Stop-Signal
 
 function log(msg) {
     const l = document.getElementById("debug-log");
@@ -127,7 +129,6 @@ async function handleImport(event) {
                     
                     // Folge-Deltas lesen bis nächster Header
                     while (pos + 1 < buffer.byteLength) {
-                        // Prüfen ob nächster Block beginnt (0xAA oder neuer Zeitstempel-Block)
                         if (view.getUint8(pos) === 0xAA) break;
                         if (pos + 8 < buffer.byteLength && view.getUint8(pos + 8) === 0xEE) break;
                         
@@ -161,7 +162,6 @@ function updateScroll() {
     ecgDisplay = segment.map(e => e.val);
     
     if (segment[0]) {
-        // Roten Punkt im Lorentz-Plot auf aktuellen Zeitpunkt setzen
         const t = segment[0].ts;
         currentIndex = allRRData.findIndex(r => r.ts >= t);
     }
@@ -176,6 +176,7 @@ async function connect() {
         });
         server = await device.gatt.connect();
         document.getElementById("status").innerText = "Verbunden";
+        log("Sensor verbunden.");
         
         const bS = await server.getPrimaryService('battery_service');
         const bV = await (await bS.getCharacteristic('battery_level')).readValue();
@@ -192,71 +193,116 @@ async function connect() {
                 if (val > 300) {
                     const ts = Date.now();
                     allRRData.push({ ts, val });
-                    db.samples.add({ timestamp: ts, type: 'RR', val });
+                    db.samples.add({ timestamp: ts, type: 'RR', val }).catch(()=>{});
                     calculateGlobalHRV();
                 }
             }
         });
         requestAnimationFrame(renderLoop);
-    } catch (e) { log("Verbindung verloren."); }
+    } catch (e) { log("Verbindung fehlgeschlagen oder verloren."); console.error(e); }
+}
+
+// Handler für eingehende EKG-Daten extrahiert, um Listener sauber zu entfernen
+function handleEcgData(e) {
+    const dv = e.target.value;
+    const ts = Date.now();
+    const batch = [];
+    
+    for(let i=10; i < dv.byteLength; i+=3) {
+        let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
+        if (val & 0x800000) val |= 0xFF000000;
+        fullECG.push({ ts, val });
+        batch.push(val);
+        if (fullECG.length > 2000) fullECG.shift();
+    }
+    
+    const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
+    const v = new DataView(buf);
+    v.setUint8(0, 0xEE);
+    v.setInt32(1, batch[0], true);
+    for(let i=1; i<batch.length; i++) {
+        v.setInt16(5 + (i-1)*2, batch[i] - batch[i-1], true);
+    }
+    db.samples.add({ timestamp: ts, type: 'ECG_BIN', val: new Uint8Array(buf) }).catch(()=>{});
 }
 
 async function toggleECG() {
-    const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
-    const ctrl = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
-    const data = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
+    if (!server) { log("Bitte zuerst Sensor verbinden!"); return; }
     
-    if (!ecgActive) {
-        await data.startNotifications();
-        data.addEventListener('characteristicvaluechanged', e => {
-            const dv = e.target.value;
-            const ts = Date.now();
-            const batch = [];
+    try {
+        if (!ctrlCharacteristic || !dataCharacteristic) {
+            const s = await server.getPrimaryService('fb005c80-02e7-f387-1cad-8acd2d8df0c8');
+            ctrlCharacteristic = await s.getCharacteristic('fb005c81-02e7-f387-1cad-8acd2d8df0c8');
+            dataCharacteristic = await s.getCharacteristic('fb005c82-02e7-f387-1cad-8acd2d8df0c8');
+        }
+        
+        if (!ecgActive) {
+            // EKG STARTEN
+            await dataCharacteristic.startNotifications();
+            dataCharacteristic.addEventListener('characteristicvaluechanged', handleEcgData);
             
-            for(let i=10; i < dv.byteLength; i+=3) {
-                let val = (dv.getUint8(i) | (dv.getUint8(i+1) << 8) | (dv.getUint8(i+2) << 16));
-                if (val & 0x800000) val |= 0xFF000000;
-                fullECG.push({ ts, val });
-                batch.push(val);
-                if (fullECG.length > 2000) fullECG.shift();
-            }
+            // Polar H10 Stream-Request (EKG @ 130Hz)
+            await ctrlCharacteristic.writeValue(new Uint8Array([0x02,0x00,0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]));
             
-            // Delta-Encoding für DB
-            const buf = new ArrayBuffer(5 + (batch.length - 1) * 2);
-            const v = new DataView(buf);
-            v.setUint8(0, 0xEE); // Marker
-            v.setInt32(1, batch[0], true); // Absoluter Startwert
-            for(let i=1; i<batch.length; i++) {
-                v.setInt16(5 + (i-1)*2, batch[i] - batch[i-1], true);
-            }
-            db.samples.add({ timestamp: ts, type: 'ECG_BIN', val: new Uint8Array(buf) });
-        });
-        await ctrl.writeValue(new Uint8Array([0x02,0x00,0x00,0x01,0x82,0x00,0x01,0x01,0x0E,0x00]));
-        ecgActive = true; 
-        document.getElementById("ecgToggleBtn").innerText="STOP";
-        document.getElementById("status").innerText = "Live";
+            ecgActive = true; 
+            document.getElementById("ecgToggleBtn").innerText = "STOP";
+            document.getElementById("ecgToggleBtn").style.background = "#d00";
+            document.getElementById("status").innerText = "Live + EKG";
+            log("EKG Stream gestartet.");
+        } else {
+            // FIX: EKG STOPPEN
+            log("Stoppe EKG Stream...");
+            // Polar H10 Stop-Signal senden (0x01 = Stop, 0x00 = EKG)
+            await ctrlCharacteristic.writeValue(new Uint8Array([0x01, 0x00]));
+            
+            await dataCharacteristic.stopNotifications();
+            dataCharacteristic.removeEventListener('characteristicvaluechanged', handleEcgData);
+            
+            ecgActive = false;
+            document.getElementById("ecgToggleBtn").innerText = "EKG STARTEN";
+            document.getElementById("ecgToggleBtn").style.background = "#555";
+            document.getElementById("status").innerText = "Verbunden";
+            log("EKG Stream gestoppt.");
+        }
+    } catch (e) {
+        log("Fehler bei EKG Toggle.");
+        console.error(e);
     }
 }
 
 async function exportBinary() {
-    const all = await db.samples.toArray();
-    let parts = [];
-    all.forEach(r => {
-        if (r.type === 'RR') {
-            const b = new ArrayBuffer(11); const v = new DataView(b);
-            v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
-            parts.push(new Uint8Array(b));
-        } else if (r.type === 'ECG_BIN') {
-            const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
-            parts.push(new Uint8Array(tsB));
-            parts.push(r.val);
+    log("Bereite Export vor...");
+    try {
+        // Sicherstellen, dass Dexie alle ausstehenden Schreiboperationen beendet hat
+        const all = await db.samples.toArray();
+        if (all.length === 0) {
+            log("Keine Daten zum Speichern vorhanden.");
+            return;
         }
-    });
-    const blob = new Blob(parts, {type: 'application/octet-stream'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `H10_Session_${Date.now()}.bin`;
-    a.click();
+
+        let parts = [];
+        all.forEach(r => {
+            if (r.type === 'RR') {
+                const b = new ArrayBuffer(11); const v = new DataView(b);
+                v.setUint8(0, 0xAA); v.setFloat64(1, r.timestamp, true); v.setUint16(9, r.val, true);
+                parts.push(new Uint8Array(b));
+            } else if (r.type === 'ECG_BIN') {
+                const tsB = new ArrayBuffer(8); new DataView(tsB).setFloat64(0, r.timestamp, true);
+                parts.push(new Uint8Array(tsB));
+                parts.push(r.val);
+            }
+        });
+        
+        const blob = new Blob(parts, {type: 'application/octet-stream'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `H10_Session_${Date.now()}.bin`;
+        a.click();
+        log("Datei erfolgreich exportiert.");
+    } catch (err) {
+        log("Export-Fehler.");
+        console.error(err);
+    }
 }
 
 function drawECG() {
@@ -267,7 +313,6 @@ function drawECG() {
   const data = ecgActive ? fullECG.slice(-600).map(e => e.val) : ecgDisplay;
   if (data.length < 2) return;
 
-  // Dynamische Skalierung
   let min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
   ctx.beginPath(); ctx.strokeStyle = "#0f0"; ctx.lineWidth = 1.5;
   for(let i=0; i<data.length; i++) {
@@ -284,11 +329,9 @@ function drawLorentz() {
     const w = 400, p = 40, size = 320;
     ctx.clearRect(0, 0, w, w);
     
-    // Achsen
     ctx.strokeStyle = "#333";
     ctx.strokeRect(p, p, size, size);
     
-    // Datenpunkte
     ctx.fillStyle = "rgba(0, 255, 0, 0.3)";
     for (let i = 1; i < allRRData.length; i++) {
         const x = p + ((allRRData[i-1].val - 300) / 1300) * size;
@@ -298,7 +341,6 @@ function drawLorentz() {
         }
     }
     
-    // Review-Marker (Rot)
     if (currentIndex >= 1 && currentIndex < allRRData.length) {
         const x = p + ((allRRData[currentIndex-1].val - 300) / 1300) * size;
         const y = p + size - ((allRRData[currentIndex].val - 300) / 1300) * size;
@@ -307,10 +349,17 @@ function drawLorentz() {
     }
 }
 
+// FIX: Zeichnet Lorentz-Plot unabhängig davon, ob EKG läuft oder nicht
 function renderLoop() { 
-    if(ecgActive) { drawECG(); drawLorentz(); } 
+    if(ecgActive) { 
+        drawECG(); 
+    }
+    // Lorentz-Plot/Poincaré baut auf RR-Daten auf, läuft also immer sobald verbunden!
+    if(allRRData.length > 0) {
+        drawLorentz(); 
+    } 
     requestAnimationFrame(renderLoop); 
 }
-</script>
+</script>    
 </body>
 </html>
