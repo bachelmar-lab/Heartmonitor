@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.3 (Fixed Save Select Menue)</title>
+<title>Polar H10 Monitor 3.4 (Fixed Save -> Share on Iphone)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.3</h2>
+<h2>Polar H10 Monitor 3.4</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -314,16 +314,31 @@ async function exportBinary() {
             await writable.close();
             
             log("Datei erfolgreich am gewählten Ort gespeichert.");
+  
         } else {
-            // FALLBACK: Altes Verhalten für Browser, die das Menü blockieren (z.B. Firefox, Safari, Mobile)
-            log("Speicher-Menü nicht unterstützt. Nutze Standard-Download...");
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; 
-            a.download = vorgeschlagenerName;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-            log("Datei im Standard-Download-Ordner gespeichert.");
+            // OPTIMIERT FÜR IPHONE / BLUEFY: Nutzt das iOS Share-Menü
+            log("iOS erkannt. Öffne Teilen-Menü...");
+            
+            // Wir erstellen ein echtes File-Objekt aus dem Blob
+            const file = new File([blob], vorgeschlagenerName, { type: 'application/octet-stream' });
+            
+            // Prüfen, ob das System Dateien teilen kann (Navigator.share)
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                await navigator.share({
+                    files: [file],
+                    title: 'Polar H10 Export',
+                    text: 'Hier ist deine EKG-Sitzung'
+                });
+                log("Teilen-Menü erfolgreich geschlossen.");
+            } else {
+                // Letzter Not-Fallback, falls Teilen blockiert ist
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = vorgeschlagenerName;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                log("In 'Downloads' der Dateien-App gespeichert.");
+            }
         }
     } catch (err) {
         // Wenn der Benutzer im Menü auf "Abbrechen" klickt, landen wir hier
