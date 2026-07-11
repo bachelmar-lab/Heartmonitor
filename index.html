@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
-<title>Polar H10 Monitor 3.7 (Fixed Save -> Share on Iphone)</title>
+<title>Polar H10 Monitor 3.8 (Fixed Save -> Share on Iphone)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
 <style>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<h2>Polar H10 Monitor 3.7</h2>
+<h2>Polar H10 Monitor 3.8</h2>
 
 <div id="status-box">
   <span>Status: <b id="status">Bereit</b></span>
@@ -72,6 +72,24 @@ function log(msg) {
     l.scrollTop = l.scrollHeight;
 }
 
+function fallbackIOSDownload(file, name) {
+    log("Fallback Download (iOS)...");
+
+    const reader = new FileReader();
+    reader.onload = function () {
+        const a = document.createElement('a');
+        a.href = reader.result;
+        a.download = name;
+
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        log("Versuchter Download gestartet (Dateien-App prüfen).");
+    };
+    reader.readAsDataURL(file);
+}
+    
 // Zentrale HRV Berechnung
 function calculateGlobalHRV() {
     const d = allRRData.map(r => r.val).filter(v => v >= 300 && v <= 1600);
@@ -289,68 +307,60 @@ function prepareFileFromData(allData, dateName) {
 }
 
 async function exportBinary() {
-    log("Lese Datenbank aus...");
-    
-    // 1. SCHRITT: Daten holen BEVOR das Klick-Zeitfenster abläuft
+    log("Starte iOS Export...");
+
     let all;
     try {
         await db.open();
         all = await db.samples.toArray();
-    } catch (dbErr) {
-        log("Datenbank-Fehler beim Lesen.");
+    } catch (e) {
+        log("DB Fehler beim Lesen.");
         return;
     }
 
     if (!all || all.length === 0) {
-        log("Keine Daten zum Speichern vorhanden.");
+        log("Keine Daten vorhanden.");
         return;
     }
 
-    const vorgeschlagenerName = `H10_Session_${Date.now()}.bin`;
+    const filename = `H10_Session_${Date.now()}.bin`;
 
-    // 2. SCHRITT: Falls Desktop-Browser (Chrome/Edge), direkt "Speichern unter" nutzen
-    if (window.showSaveFilePicker) {
-        log("Öffne Speicher-Menü...");
+    // Datei vorbereiten (wichtig: VOR share!)
+    const file = prepareFileFromData(all, filename);
+
+    // 🔥 iOS BEST PRACTICE: IMMER share() versuchen (kein canShare!)
+    if (navigator.share) {
         try {
-            const file = prepareFileFromData(all, vorgeschlagenerName);
-            const handle = await window.showSaveFilePicker({
-                suggestedName: vorgeschlagenerName,
-                types: [{ description: 'Polar H10 Binärdatei', accept: { 'application/octet-stream': ['.bin'] } }]
-            });
-            const writable = await handle.createWritable();
-            await writable.write(file);
-            await writable.close();
-            log("Datei erfolgreich gespeichert.");
+            log("Öffne iOS Teilen-Menü...");
+
+            // Trick: minimal verzögern, damit iOS Gesture-Kontext behält
+            setTimeout(async () => {
+                try {
+                    await navigator.share({
+                        title: filename,
+                        files: [file]
+                    });
+                    log("Export erfolgreich (iOS Share).");
+                } catch (err) {
+                    if (err.name === "AbortError") {
+                        log("Teilen abgebrochen.");
+                    } else {
+                        log("Share fehlgeschlagen → Fallback aktiv.");
+                        fallbackIOSDownload(file, filename);
+                    }
+                }
+            }, 50);
+
             return;
-        } catch(e) { 
-            log("Abgebrochen oder Fehler."); 
-            return; 
+
+        } catch (err) {
+            log("Share API Fehler → Fallback.");
         }
     }
 
-    // 3. SCHRITT: FÜR IPHONE / BLUEFY
-    // Wir bereiten die Datei blitzschnell vor
-    const file = prepareFileFromData(all, vorgeschlagenerName);
-
-    log("Rufe iOS Teilen-Menü auf...");
-    // Da wir jetzt keine 'awaits' mehr vor dem share() haben, klappt das Menü sofort auf!
-    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-            await navigator.share({ files: [file] });
-            log("Erfolgreich exportiert!");
-        } catch (shareError) {
-            if (shareError.name === 'AbortError') {
-                log("Teilen vom Nutzer abgebrochen.");
-            } else {
-                log("iOS hat das Teilen verweigert.");
-                forceDownloadFallback(file, vorgeschlagenerName);
-            }
-        }
-    } else {
-        log("Teilen nicht unterstützt. Erzwinge Download...");
-        forceDownloadFallback(file, vorgeschlagenerName);
-    }
-}
+    // 🔴 Fallback (für alte iOS / Fehlerfälle)
+    fallbackIOSDownload(file, filename);
+}    
 
 // Separater Fallback, um den Hauptcode sauber zu halten
 function forceDownloadFallback(file, name) {
